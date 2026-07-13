@@ -4,7 +4,13 @@ Working notes for this repo — read before making non-trivial changes. Not a re
 
 ## What this is
 
-The LLM-prompting leg of an ERC (emotion recognition in conversation) research study: inference-only over IEMOCAP via Ollama, no training. Sibling to the PLM (fine-tuning) repo `ContextStudy_NewResearch` — results must stay comparable, so splits and dialogue reconstruction match that repo exactly. Runs on a remote Linux box via `./setup.sh` (self-contained: installs the Ollama server binary, not just the Python client, starts it, pulls the default model). Originally scoped for local macOS too; `setup.sh` branches on `uname` for both.
+The LLM-prompting leg of an ERC (emotion recognition in conversation) research study: inference-only over IEMOCAP via Ollama, no training. Sibling to the PLM (fine-tuning) repo `ContextStudy_NewResearch` — results must stay comparable, so splits and dialogue reconstruction match that repo exactly. Runs on a **remote Linux box with no root/sudo access** via `./setup.sh` (self-contained: installs the Ollama server binary into a user-writable prefix, not just the Python client; starts it; pulls the default model). Originally scoped for local macOS too; `setup.sh` branches on `uname` for both.
+
+Python environment is a **conda env** (`environment.yml`, default name `llm_leg`), not venv — switched because the remote box has conda available but no sudo, and conda envs are fully user-space (no root needed for either conda itself, typically installed via Miniconda into `$HOME`, or for env creation).
+
+## No-root Ollama install
+
+`ollama`'s own `install.sh` needs sudo only for installing into `/usr/local`, chown-ing to root, and creating a systemd service running as a dedicated `ollama` user — none of that is required to just run `ollama serve` as the current user. `setup.sh` instead downloads the same release tarball (`https://ollama.com/download/ollama-linux-${arch}.tgz`) and extracts it into `$OLLAMA_INSTALL_DIR` (default `~/.local/ollama`), then runs the binary directly from there. Verified against the actual `install.sh` source (fetched directly) before implementing this — don't reintroduce a sudo-requiring path here. Do not assume conda-forge packages Ollama itself (unconfirmed, and not how this repo installs it) — conda is used only for the Python side.
 
 ## Data conventions that must not drift
 
@@ -30,7 +36,8 @@ Don't collapse `condition` and `context.strategy` back into one field — that's
 ## Commands
 
 ```
-./setup.sh                                              # bootstrap everything (idempotent)
+./setup.sh                                              # bootstrap everything (idempotent, no sudo)
+conda activate llm_leg
 python -m src.run --config configs/c0_mistral.json --dry-run
 python -m src.run --config configs/c1_mistral.json --dry-run
 python -m src.run --config configs/c0_mistral.json --smoke

@@ -6,21 +6,31 @@ Data conventions match the `ContextStudy_NewResearch` PLM repo exactly where it 
 
 ## Setup
 
-One-command bootstrap (idempotent, safe to re-run) — installs the Ollama server binary (Linux via the official install script, macOS via Homebrew), creates a venv, installs Python dependencies, starts the Ollama server, and pulls the default model:
+Requires `conda` (e.g. Miniconda) already installed — Miniconda installs entirely into `$HOME`, no root needed: https://docs.conda.io/en/latest/miniconda.html
+
+One-command bootstrap (idempotent, safe to re-run), **no root/sudo required anywhere**:
 
 ```bash
 ./setup.sh
 ```
 
-Override the model with `OLLAMA_MODEL=<tag> ./setup.sh` if needed. To do it manually instead:
+This installs the Ollama server binary (Linux: extracts the official release tarball straight into `~/.local/ollama`, bypassing the parts of the official installer that need root — a real system-wide install isn't necessary just to run `ollama serve` as yourself; macOS: via Homebrew), creates/updates a conda env named `llm_leg` from `environment.yml`, starts the Ollama server in the background, and pulls the default model.
+
+Override with env vars if needed: `OLLAMA_MODEL=<tag>`, `OLLAMA_INSTALL_DIR=<path>` (default `~/.local/ollama`), `CONDA_ENV_NAME=<name>` (default `llm_leg`).
+
+To do it manually instead:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# Install Ollama: https://ollama.com/download (Linux: curl -fsSL https://ollama.com/install.sh | sh)
+# Ollama binary, no sudo (Linux example, adjust arch: amd64/arm64):
+mkdir -p ~/.local/ollama
+curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz | tar -xzf - -C ~/.local/ollama
+export PATH="$HOME/.local/ollama/bin:$PATH"   # add to ~/.bashrc to persist
 ollama serve &          # start the local server if not already running
 ollama pull mistral:7b-instruct-q4_K_M
+
+# Python env:
+conda env create -f environment.yml   # or: conda env update -f environment.yml --prune
+conda activate llm_leg
 ```
 
 `src/run.py` fails fast with a clear error if the Ollama server isn't reachable when a real run starts (`--dry-run` never needs it).
@@ -37,6 +47,8 @@ cp /path/to/iemocap_merged_all.csv data/iemocap/
 Required columns: `session, dialog, utterance_id, speaker, start_time, end_time, text, emotion, valence, arousal, dominance`.
 
 ## Usage
+
+With the `llm_leg` conda env active (`conda activate llm_leg`):
 
 ```bash
 # Dry run: print 3 fully-rendered prompts (incl. a first-utterance C1 case
