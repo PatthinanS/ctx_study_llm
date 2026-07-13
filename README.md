@@ -1,0 +1,82 @@
+# ContextStudy_LLM — LLM Prompting Leg
+
+This is the LLM-prompting leg of an ERC (emotion recognition in conversation) research study, run via [Ollama](https://ollama.com). It is inference-only — no training — and is a sibling to the PLM (fine-tuning) leg at `ContextStudy_NewResearch`. Two conditions are implemented: **C0** (target utterance only, no context) and **C1** (last k=3 prior turns of the same dialogue as context). C2 (retrieval-based context) and C3 (LoRA factorial) are designed to slot in later without restructuring — see "Extending" below. Designed to run unattended on a remote Linux box (`./setup.sh` provisions everything, including the Ollama server itself); local macOS development also works.
+
+Data conventions match the `ContextStudy_NewResearch` PLM repo exactly where it matters for comparability: leave-one-session-out splits (test=Session5, val=Session4, train=Sessions1-3) and the same source CSV/dialogue reconstruction (group by `(session, dialog)`, sort by `start_time`). The 6-way categorical filter (`LABELS = [ang, hap, exc, neu, sad, fru]`, excluding rows with `emotion` in `{xxx, sur, fea, dis, oth, ""}` or missing) is new to this repo — the PLM repo is VAD-regression only and has no categorical component. Dimensional (VAD) metrics are computed over the full test split (every row with a non-null gold VAD triple, since Session5 has a small number of rows with missing VAD annotations), while categorical metrics are computed only over the subset of rows with a usable gold label AND a valid model prediction.
+
+## Setup
+
+One-command bootstrap (idempotent, safe to re-run) — installs the Ollama server binary (Linux via the official install script, macOS via Homebrew), creates a venv, installs Python dependencies, starts the Ollama server, and pulls the default model:
+
+```bash
+./setup.sh
+```
+
+Override the model with `OLLAMA_MODEL=<tag> ./setup.sh` if needed. To do it manually instead:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Install Ollama: https://ollama.com/download (Linux: curl -fsSL https://ollama.com/install.sh | sh)
+ollama serve &          # start the local server if not already running
+ollama pull mistral:7b-instruct-q4_K_M
+```
+
+`src/run.py` fails fast with a clear error if the Ollama server isn't reachable when a real run starts (`--dry-run` never needs it).
+
+## Data placement
+
+Copy the merged IEMOCAP CSV into `data/iemocap/iemocap_merged_all.csv` (the `data/` directory is gitignored):
+
+```bash
+mkdir -p data/iemocap
+cp /path/to/iemocap_merged_all.csv data/iemocap/
+```
+
+Required columns: `session, dialog, utterance_id, speaker, start_time, end_time, text, emotion, valence, arousal, dominance`.
+
+## Usage
+
+```bash
+# Dry run: print 3 fully-rendered prompts (incl. a first-utterance C1 case
+# with empty context) and exit without calling Ollama.
+python -m src.run --config configs/c0_mistral.json --dry-run
+python -m src.run --config configs/c1_mistral.json --dry-run
+
+# Smoke test: 20 utterances end-to-end through real Ollama.
+python -m src.run --config configs/c0_mistral.json --smoke
+python -m src.run --config configs/c1_mistral.json --smoke
+
+# Full runs.
+python -m src.run --config configs/c0_mistral.json
+python -m src.run --config configs/c1_mistral.json
+
+# Score.
+python -m src.score --run outputs/c0_mistral
+python -m src.score --run outputs/c1_mistral
+```
+
+Runs are resumable: interrupting and rerunning the same command skips utterance_ids already present in `outputs/<experiment_name>/preds.jsonl`.
+
+## Output layout
+
+```
+outputs/<experiment_name>/
+  preds.jsonl    # one JSON record per utterance
+  run_meta.json  # full config, system prompt, model, ollama version, timestamp, git commit
+  metrics.json   # written by src.score, categorical + dimensional blocks
+```
+
+## Testing
+
+```bash
+pytest tests/
+```
+
+No Ollama connection is required for the test suite. The split-parity test (`Session5` test split == 2195 rows) is skipped automatically if `data/iemocap/iemocap_merged_all.csv` is not present.
+
+## Extending
+
+- **C2 (retrieval)**: add a new function to `STRATEGY_REGISTRY` in `src/data.py` with the same signature as `_strategy_window`, then add a config with `condition: "C1"` and `context.strategy: "retrieval"` — the existing C1 prompt template is reused unchanged.
+- **C3 (LoRA factorial)**: add a new config with a different `model` tag (an Ollama model built from a LoRA-adapted GGUF). No code changes are needed — `model` is threaded straight into the Ollama call, and `run_meta.json` already logs the exact model string per run for traceability.
