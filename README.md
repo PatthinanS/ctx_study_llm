@@ -14,23 +14,20 @@ One-command bootstrap (idempotent, safe to re-run), **no root/sudo required anyw
 ./setup.sh
 ```
 
-This installs the Ollama server binary (Linux: extracts the official release tarball straight into `~/.local/ollama`, bypassing the parts of the official installer that need root — a real system-wide install isn't necessary just to run `ollama serve` as yourself; macOS: via Homebrew), creates/updates a conda env named `llm_leg` from `environment.yml`, starts the Ollama server in the background, and pulls the default model.
+This creates/updates a conda env named `llm_leg` from `environment.yml` — which installs **both** the Ollama server binary (the `conda-forge::ollama` package) **and** the Python dependencies in one shot — then starts the Ollama server in the background and pulls the default model.
 
-Override with env vars if needed: `OLLAMA_MODEL=<tag>`, `OLLAMA_INSTALL_DIR=<path>` (default `~/.local/ollama`), `CONDA_ENV_NAME=<name>` (default `llm_leg`).
+Ollama comes from conda-forge rather than Ollama's own installer/binary deliberately: their official binary requires a fairly recent glibc (e.g. `GLIBC_2.28+`), which older remote boxes may not have and which you can't upgrade without root. conda-forge's build targets a much older baseline glibc for portability, so it runs on older systems too.
+
+Override with env vars if needed: `OLLAMA_MODEL=<tag>`, `CONDA_ENV_NAME=<name>` (default `llm_leg`).
 
 To do it manually instead:
 
 ```bash
-# Ollama binary, no sudo (Linux example, adjust arch: amd64/arm64):
-mkdir -p ~/.local/ollama
-curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz | tar -xzf - -C ~/.local/ollama
-export PATH="$HOME/.local/ollama/bin:$PATH"   # add to ~/.bashrc to persist
-ollama serve &          # start the local server if not already running
-ollama pull mistral:7b-instruct-q4_K_M
-
-# Python env:
 conda env create -f environment.yml   # or: conda env update -f environment.yml --prune
 conda activate llm_leg
+
+ollama serve &          # start the local server if not already running
+ollama pull mistral:7b-instruct-q4_K_M
 ```
 
 `src/run.py` fails fast with a clear error if the Ollama server isn't reachable when a real run starts (`--dry-run` never needs it).

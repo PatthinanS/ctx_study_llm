@@ -2,65 +2,26 @@
 # Self-contained bootstrap for running ContextStudy_LLM on a remote box with
 # NO ROOT ACCESS. Idempotent: safe to re-run.
 #
-#   1. Ollama server binary: installed by extracting the official release
-#      tarball into a user-writable prefix ($OLLAMA_INSTALL_DIR, default
-#      ~/.local/ollama) instead of /usr/local -- this is exactly what
-#      ollama's own install.sh does internally, minus the sudo-only steps
-#      (root-owned /usr/local, a systemd service running as a dedicated
-#      "ollama" user). None of that is required to just run `ollama serve`
-#      as the current user.
-#   2. Python environment: a conda env (default name "llm_leg") instead of
-#      venv, created from environment.yml. Requires `conda` (e.g. Miniconda)
-#      already installed -- Miniconda itself installs into $HOME, no root
-#      needed, but this script does not install conda itself.
+# Both the Ollama server binary and the Python dependencies come from a
+# single conda env (default name "llm_leg", see environment.yml): the
+# conda-forge "ollama" package for the CLI/server, plus python + pip deps.
+# Using conda-forge's build (rather than Ollama's own installer/binary,
+# which needs a fairly recent glibc -- e.g. requires GLIBC_2.28+) also
+# sidesteps old-glibc remote boxes, since conda-forge targets a much older
+# baseline glibc for portability.
+#
+# Requires `conda` (e.g. Miniconda) already installed -- Miniconda itself
+# installs into $HOME, no root needed, but this script does not install
+# conda itself.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
 OLLAMA_MODEL="${OLLAMA_MODEL:-mistral:7b-instruct-q4_K_M}"
 OLLAMA_HOST_URL="${OLLAMA_HOST_URL:-http://127.0.0.1:11434}"
-OLLAMA_INSTALL_DIR="${OLLAMA_INSTALL_DIR:-$HOME/.local/ollama}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-llm_leg}"
 
-echo "== 1/5: Ollama server binary (no root required) =="
-if command -v ollama >/dev/null 2>&1; then
-    echo "ollama already on PATH: $(command -v ollama)"
-elif [ -x "$OLLAMA_INSTALL_DIR/bin/ollama" ]; then
-    echo "ollama already installed at $OLLAMA_INSTALL_DIR/bin/ollama"
-    export PATH="$OLLAMA_INSTALL_DIR/bin:$PATH"
-else
-    os="$(uname -s)"
-    if [ "$os" = "Linux" ]; then
-        arch="$(uname -m)"
-        case "$arch" in
-            x86_64) arch="amd64" ;;
-            aarch64|arm64) arch="arm64" ;;
-            *) echo "ERROR: unsupported architecture '$arch'." >&2; exit 1 ;;
-        esac
-        echo "Downloading ollama-linux-${arch}.tgz into $OLLAMA_INSTALL_DIR (no sudo)..."
-        mkdir -p "$OLLAMA_INSTALL_DIR"
-        curl --fail --show-error --location --progress-bar \
-            "https://ollama.com/download/ollama-linux-${arch}.tgz" | \
-            tar -xzf - -C "$OLLAMA_INSTALL_DIR"
-        export PATH="$OLLAMA_INSTALL_DIR/bin:$PATH"
-        echo "NOTE: add this to your shell rc (~/.bashrc) to persist across sessions:"
-        echo "  export PATH=\"$OLLAMA_INSTALL_DIR/bin:\$PATH\""
-    elif [ "$os" = "Darwin" ]; then
-        if command -v brew >/dev/null 2>&1; then
-            echo "Installing Ollama via Homebrew..."
-            brew install ollama
-        else
-            echo "ERROR: ollama not found and Homebrew is not available." >&2
-            echo "Install manually from https://ollama.com/download and re-run this script." >&2
-            exit 1
-        fi
-    else
-        echo "ERROR: unsupported OS '$os'. Install Ollama manually from https://ollama.com/download." >&2
-        exit 1
-    fi
-fi
-
-echo "== 2/5: Conda environment (${CONDA_ENV_NAME}) =="
+echo "== 1/4: Conda environment (${CONDA_ENV_NAME}), incl. Ollama + Python deps =="
 if ! command -v conda >/dev/null 2>&1; then
     echo "ERROR: conda not found on PATH." >&2
     echo "Install Miniconda (no root needed, installs into \$HOME):" >&2
@@ -79,12 +40,15 @@ else
 fi
 conda activate "${CONDA_ENV_NAME}"
 
-echo "== 3/5: Python dependencies =="
-echo "installed via environment.yml (conda env create/update above already ran pip install -r requirements.txt)"
+command -v ollama >/dev/null 2>&1 || {
+    echo "ERROR: ollama not on PATH after conda env activation -- check environment.yml." >&2
+    exit 1
+}
+echo "ollama: $(command -v ollama) ($(ollama --version 2>&1 | head -1))"
 
 mkdir -p outputs
 
-echo "== 4/5: Ollama server =="
+echo "== 2/4: Ollama server =="
 server_up() {
     curl -fsS "${OLLAMA_HOST_URL}/api/tags" >/dev/null 2>&1
 }
@@ -109,8 +73,11 @@ else
     echo "Ollama server is up at ${OLLAMA_HOST_URL}"
 fi
 
-echo "== 5/5: Pull default model (${OLLAMA_MODEL}) =="
+echo "== 3/4: Pull default model (${OLLAMA_MODEL}) =="
 ollama pull "${OLLAMA_MODEL}"
+
+echo "== 4/4: Data directory =="
+mkdir -p data/iemocap
 
 cat <<EOF
 
@@ -123,7 +90,7 @@ Setup complete.
 
 Next steps:
   conda activate ${CONDA_ENV_NAME}
-  mkdir -p data/iemocap   # copy iemocap_merged_all.csv here if not already present
+  # copy iemocap_merged_all.csv into data/iemocap/ if not already present
 
   python -m src.run --config configs/c0_mistral.json --dry-run
   python -m src.run --config configs/c1_mistral.json --dry-run

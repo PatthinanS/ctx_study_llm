@@ -4,13 +4,20 @@ Working notes for this repo — read before making non-trivial changes. Not a re
 
 ## What this is
 
-The LLM-prompting leg of an ERC (emotion recognition in conversation) research study: inference-only over IEMOCAP via Ollama, no training. Sibling to the PLM (fine-tuning) repo `ContextStudy_NewResearch` — results must stay comparable, so splits and dialogue reconstruction match that repo exactly. Runs on a **remote Linux box with no root/sudo access** via `./setup.sh` (self-contained: installs the Ollama server binary into a user-writable prefix, not just the Python client; starts it; pulls the default model). Originally scoped for local macOS too; `setup.sh` branches on `uname` for both.
+The LLM-prompting leg of an ERC (emotion recognition in conversation) research study: inference-only over IEMOCAP via Ollama, no training. Sibling to the PLM (fine-tuning) repo `ContextStudy_NewResearch` — results must stay comparable, so splits and dialogue reconstruction match that repo exactly. Runs on a **remote Linux box with no root/sudo access** via `./setup.sh` (self-contained: one conda env provides both the Ollama server binary and the Python deps; starts the server; pulls the default model). Originally scoped for local macOS too (Ollama via Homebrew works fine there).
 
 Python environment is a **conda env** (`environment.yml`, default name `llm_leg`), not venv — switched because the remote box has conda available but no sudo, and conda envs are fully user-space (no root needed for either conda itself, typically installed via Miniconda into `$HOME`, or for env creation).
 
-## No-root Ollama install
+## No-root Ollama install: use conda-forge, not Ollama's own installer
 
-`ollama`'s own `install.sh` needs sudo only for installing into `/usr/local`, chown-ing to root, and creating a systemd service running as a dedicated `ollama` user — none of that is required to just run `ollama serve` as the current user. `setup.sh` instead downloads the same release tarball (`https://ollama.com/download/ollama-linux-${arch}.tgz`) and extracts it into `$OLLAMA_INSTALL_DIR` (default `~/.local/ollama`), then runs the binary directly from there. Verified against the actual `install.sh` source (fetched directly) before implementing this — don't reintroduce a sudo-requiring path here. Do not assume conda-forge packages Ollama itself (unconfirmed, and not how this repo installs it) — conda is used only for the Python side.
+Two problems ruled out Ollama's own `install.sh`/prebuilt binary on the remote box, in order of discovery:
+
+1. **Needs sudo.** It requires root for installing into `/usr/local`, chown-ing to root, and creating a systemd service running as a dedicated `ollama` user — none of that is actually required just to run `ollama serve` as the current user. (Verified against the real `install.sh` source, fetched directly, before ruling this out.)
+2. **Even side-stepping sudo by extracting the release tarball into a user-writable prefix** (what an earlier version of `setup.sh` did — download `ollama-linux-${arch}.tar.zst`/`.tgz` from `ollama.com/download` and `tar`-extract into `~/.local/ollama`) **still failed on the remote box** with `libc.so.6: version 'GLIBC_2.28' not found` — Ollama's official binary requires a newer glibc than the remote has, and you can't upgrade system glibc without root either.
+
+The fix: install via **`conda-forge::ollama`** instead (confirmed to exist — `curl -s "https://api.anaconda.org/search?name=ollama"` lists it under the `conda-forge` channel with many versions). conda-forge builds target a much older baseline glibc for portability, so it runs on the remote's older libc. This is now just a line in `environment.yml`'s conda `dependencies:` — `setup.sh` no longer does any manual curl/tar/zstd archive handling at all; `conda env create -f environment.yml` installs the `ollama` CLI/server binary and all Python deps (including the separate `ollama` **Python client** from pip — different package, same name, no conflict) in one step.
+
+If this ever needs revisiting: don't reintroduce the tarball-extraction approach as the primary path — it's a strictly worse fit for this remote environment than conda-forge on both the sudo axis and the glibc axis.
 
 ## Data conventions that must not drift
 
