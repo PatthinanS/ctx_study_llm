@@ -300,6 +300,17 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     preds_path = output_dir / "preds.jsonl"
 
+    if preds_path.exists():
+        try:
+            answer = input(
+                f"{preds_path} already exists. Remove it and start fresh? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer == "y":
+            preds_path.unlink()
+            print(f"[run] removed {preds_path}, starting fresh")
+
     write_run_meta(output_dir, cfg)
 
     done_ids = load_done_ids(preds_path)
