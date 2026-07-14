@@ -6,7 +6,7 @@ Working notes for this repo — read before making non-trivial changes. Not a re
 
 The LLM-prompting leg of an ERC (emotion recognition in conversation) research study: inference-only over IEMOCAP via Ollama, no training. Sibling to the PLM (fine-tuning) repo `ContextStudy_NewResearch` — results must stay comparable, so splits and dialogue reconstruction match that repo exactly. Runs on a **remote Linux box with no root/sudo access** via `./setup.sh` (self-contained: one conda env provides both the Ollama server binary and the Python deps; starts the server; pulls the default model). Originally scoped for local macOS too (Ollama via Homebrew works fine there).
 
-Python environment is a **conda env** (`environment.yml`, default name `llm_leg`), not venv — switched because the remote box has conda available but no sudo, and conda envs are fully user-space (no root needed for either conda itself, typically installed via Miniconda into `$HOME`, or for env creation).
+Python environment is a **conda env** (`environment.yml`, default name `venv`) rather than Python's built-in `venv` tool — switched to conda because the remote box has conda available but no sudo, and conda envs are fully user-space (no root needed for either conda itself, typically installed via Miniconda into `$HOME`, or for env creation).
 
 ## No-root Ollama install: use conda-forge, not Ollama's own installer
 
@@ -18,6 +18,20 @@ Two problems ruled out Ollama's own `install.sh`/prebuilt binary on the remote b
 The fix: install via **`conda-forge::ollama`** instead (confirmed to exist — `curl -s "https://api.anaconda.org/search?name=ollama"` lists it under the `conda-forge` channel with many versions). conda-forge builds target a much older baseline glibc for portability, so it runs on the remote's older libc. This is now just a line in `environment.yml`'s conda `dependencies:` — `setup.sh` no longer does any manual curl/tar/zstd archive handling at all; `conda env create -f environment.yml` installs the `ollama` CLI/server binary and all Python deps (including the separate `ollama` **Python client** from pip — different package, same name, no conflict) in one step.
 
 If this ever needs revisiting: don't reintroduce the tarball-extraction approach as the primary path — it's a strictly worse fit for this remote environment than conda-forge on both the sudo axis and the glibc axis.
+
+## `ollama` version is pinned in `environment.yml` — don't casually bump it
+
+`environment.yml` pins `ollama=0.22.0=cpu_hacd46da_0` rather than leaving the dependency unconstrained. This is deliberate, found the hard way on the remote box (2026-07-14):
+
+conda-forge's `ollama` **0.30.x** builds — confirmed for both the `cpu_hacd46da_0` and `cuda_129`/`cuda_130` build variants — are missing the bundled `llama-server` runner binary (the actual llama.cpp inference engine; the main `ollama` binary is just the Go orchestrator that spawns it per-model on first use). This is a known upstream packaging regression, not specific to this repo or this remote box — see [ollama/ollama#16535](https://github.com/ollama/ollama/issues/16535), [#16643](https://github.com/ollama/ollama/issues/16643), and the parallel Homebrew report [Homebrew/homebrew-core#285982](https://github.com/Homebrew/homebrew-core/issues/285982). Symptom: `ollama serve` starts fine and `ollama list`/`ollama pull` work fine (they don't need the runner), but any actual inference call (`ollama run`, or `ollama.chat()` from `src/run.py`) fails with:
+
+```
+Error: 500 Internal Server Error: error starting llama-server: llama-server binary not found (checked: ...). Run 'cmake -S llama/server --preset cpu && cmake --build --preset cpu' first
+```
+
+**`ollama serve` starting successfully is not evidence the install is healthy** — the runner is only spawned lazily on the first real inference request for a given model, so this failure mode can hide until you're well into a run. Don't use `find <prefix> -iname "*llama-server*"` as a health check either — it produced false negatives even against versions that turned out to work fine (the runner may only materialize on first use, not at install time); the only reliable test is an actual `ollama run <model> "..."` call.
+
+The fix was downgrading to `0.22.0` (confirmed working via a real `ollama run` call, glibc floor `>=2.17` so compatible with older remote boxes too). If bumping this version in the future, verify with a real inference call on the target box first, not just `ollama --version` or `find`.
 
 ## Data conventions that must not drift
 
@@ -44,7 +58,7 @@ Don't collapse `condition` and `context.strategy` back into one field — that's
 
 ```
 ./setup.sh                                              # bootstrap everything (idempotent, no sudo)
-conda activate llm_leg
+conda activate venv
 python -m src.run --config configs/c0_mistral.json --dry-run
 python -m src.run --config configs/c1_mistral.json --dry-run
 python -m src.run --config configs/c0_mistral.json --smoke

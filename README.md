@@ -14,17 +14,19 @@ One-command bootstrap (idempotent, safe to re-run), **no root/sudo required anyw
 ./setup.sh
 ```
 
-This creates/updates a conda env named `llm_leg` from `environment.yml` — which installs **both** the Ollama server binary (the `conda-forge::ollama` package) **and** the Python dependencies in one shot — then starts the Ollama server in the background and pulls the default model.
+This creates/updates a conda env named `venv` from `environment.yml` — which installs **both** the Ollama server binary (the `conda-forge::ollama` package) **and** the Python dependencies in one shot — then starts the Ollama server in the background and pulls the default model.
 
 Ollama comes from conda-forge rather than Ollama's own installer/binary deliberately: their official binary requires a fairly recent glibc (e.g. `GLIBC_2.28+`), which older remote boxes may not have and which you can't upgrade without root. conda-forge's build targets a much older baseline glibc for portability, so it runs on older systems too.
 
-Override with env vars if needed: `OLLAMA_MODEL=<tag>`, `CONDA_ENV_NAME=<name>` (default `llm_leg`).
+The `ollama` version in `environment.yml` is pinned deliberately (`0.22.0`, not latest) — conda-forge's `0.30.x` builds are missing the bundled `llama-server` runner binary (an upstream packaging bug), so inference calls fail with "llama-server binary not found" even though `ollama serve` itself starts fine. See `CLAUDE.md` before bumping this version.
+
+Override with env vars if needed: `OLLAMA_MODEL=<tag>`, `CONDA_ENV_NAME=<name>` (default `venv`).
 
 To do it manually instead:
 
 ```bash
 conda env create -f environment.yml   # or: conda env update -f environment.yml --prune
-conda activate llm_leg
+conda activate venv
 
 ollama serve &          # start the local server if not already running
 ollama pull mistral:7b-instruct-q4_K_M
@@ -45,7 +47,7 @@ Required columns: `session, dialog, utterance_id, speaker, start_time, end_time,
 
 ## Usage
 
-With the `llm_leg` conda env active (`conda activate llm_leg`):
+With the `venv` conda env active (`conda activate venv`):
 
 ```bash
 # Dry run: print 3 fully-rendered prompts (incl. a first-utterance C1 case

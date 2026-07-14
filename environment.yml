@@ -1,9 +1,9 @@
-name: llm_leg
+name: venv
 channels:
   - conda-forge
 dependencies:
   - python=3.10
   - pip
-  - ollama
+  - ollama=0.22.0=cpu_hacd46da_0  # pinned: 0.30.x conda-forge builds ship without llama-server (see CLAUDE.md)
   - pip:
       - -r requirements.txt
