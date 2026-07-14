@@ -1,6 +1,6 @@
 {
-  "experiment_name": "c1_mistral",
-  "model": "mistral:7b-instruct-q4_K_M",
+  "experiment_name": "c1_llama31",
+  "model": "llama3.1:8b",
   "csv_path": "data/iemocap/iemocap_merged_all.csv",
   "splits": {
     "test_session": "Session5",
