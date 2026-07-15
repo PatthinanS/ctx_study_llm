@@ -17,5 +17,6 @@
   "output_dir": "outputs",
   "temperature": 0,
   "seed": 42,
-  "max_eval": null
+  "max_eval": null,
+  "concurrency": 4
 }

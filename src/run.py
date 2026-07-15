@@ -13,13 +13,20 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from tqdm import tqdm
 
-from src.data import build_context, get_splits, iter_eval_rows, load_iemocap
+from src.data import (
+    build_context,
+    get_splits,
+    is_categorical_usable,
+    iter_eval_rows,
+    load_iemocap,
+)
 from src.prompts import (
     RESPONSE_SCHEMA,
     SYSTEM_PROMPT,
@@ -49,6 +56,7 @@ def load_config(path: str) -> dict:
     if missing:
         raise ValueError(f"Config missing required fields: {sorted(missing)}")
     cfg.setdefault("max_eval", None)
+    cfg.setdefault("concurrency", 1)
     return cfg
 
 
@@ -182,6 +190,36 @@ def call_ollama_with_retry(
     return None, {"v": None, "a": None, "d": None}, latency_ms, raw
 
 
+def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: dict) -> dict:
+    """Run one utterance through Ollama and build its preds.jsonl record.
+
+    Pure compute, no file I/O -- safe to call concurrently from a thread pool.
+    """
+    user_prompt = render_fn(row, history)
+    gold_label = row["emotion"] if is_categorical_usable(row) else None
+    gold_vad = {
+        "v": _nan_to_none(row["valence"]),
+        "a": _nan_to_none(row["arousal"]),
+        "d": _nan_to_none(row["dominance"]),
+    }
+
+    pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    )
+
+    return {
+        "utterance_id": row["utterance_id"],
+        "condition": cfg["condition"],
+        "model": cfg["model"],
+        "gold_label": gold_label,
+        "gold_vad": gold_vad,
+        "pred_label": pred_label,
+        "pred_vad": pred_vad,
+        "latency_ms": latency_ms,
+        "raw_response": raw,
+    }
+
+
 def write_run_meta(output_dir: Path, cfg: dict) -> None:
     try:
         version_out = subprocess.run(
@@ -301,8 +339,6 @@ def main() -> None:
 
     ensure_ollama_reachable(cfg["model"])
 
-    from src.data import is_categorical_usable
-
     output_dir = Path(cfg["output_dir"]) / cfg["experiment_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
     preds_path = output_dir / "preds.jsonl"
@@ -330,36 +366,28 @@ def main() -> None:
 
     options = {"temperature": cfg["temperature"], "seed": cfg["seed"]}
     n_invalid_label = 0
+    concurrency = max(1, cfg["concurrency"])
 
+    # Workers only compute (process_one does no file I/O); this thread writes
+    # every completed record as it arrives, so preds.jsonl writes stay
+    # single-threaded and per-record-flushed regardless of concurrency.
     with open(preds_path, "a") as f:
-        for row, history in tqdm(remaining, desc=cfg["experiment_name"], unit="utt"):
-            user_prompt = render_fn(row, history)
-            gold_label = row["emotion"] if is_categorical_usable(row) else None
-            gold_vad = {
-                "v": _nan_to_none(row["valence"]),
-                "a": _nan_to_none(row["arousal"]),
-                "d": _nan_to_none(row["dominance"]),
-            }
-
-            pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
-                cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
-            )
-            if pred_label is None:
-                n_invalid_label += 1
-
-            record = {
-                "utterance_id": row["utterance_id"],
-                "condition": cfg["condition"],
-                "model": cfg["model"],
-                "gold_label": gold_label,
-                "gold_vad": gold_vad,
-                "pred_label": pred_label,
-                "pred_vad": pred_vad,
-                "latency_ms": latency_ms,
-                "raw_response": raw,
-            }
-            f.write(json.dumps(record) + "\n")
-            f.flush()
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [
+                executor.submit(process_one, row, history, cfg, render_fn, options)
+                for row, history in remaining
+            ]
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=cfg["experiment_name"],
+                unit="utt",
+            ):
+                record = future.result()
+                if record["pred_label"] is None:
+                    n_invalid_label += 1
+                f.write(json.dumps(record) + "\n")
+                f.flush()
 
     print(
         f"[run] done. {len(remaining)} processed this run, "
