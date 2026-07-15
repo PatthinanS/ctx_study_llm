@@ -11,7 +11,10 @@ from src.run import (
 def test_load_done_ids_skips_completed(tmp_path):
     preds_path = tmp_path / "preds.jsonl"
     preds_path.write_text(
-        json.dumps({"utterance_id": "u1"}) + "\n" + json.dumps({"utterance_id": "u2"}) + "\n"
+        json.dumps({"utterance_id": "u1", "pred_label": "hap"})
+        + "\n"
+        + json.dumps({"utterance_id": "u2", "pred_label": "neu"})
+        + "\n"
     )
     assert load_done_ids(preds_path) == {"u1", "u2"}
 
@@ -23,7 +26,23 @@ def test_load_done_ids_missing_file(tmp_path):
 def test_load_done_ids_tolerates_corrupt_trailing_line(tmp_path):
     preds_path = tmp_path / "preds.jsonl"
     preds_path.write_text(
-        json.dumps({"utterance_id": "u1"}) + "\n" + '{"utterance_id": "u2", "incomple'
+        json.dumps({"utterance_id": "u1", "pred_label": "hap"})
+        + "\n"
+        + '{"utterance_id": "u2", "incomple'
+    )
+    assert load_done_ids(preds_path) == {"u1"}
+
+
+def test_load_done_ids_excludes_failed_predictions(tmp_path):
+    """A row with a null pred_label (failed even after retry) must not be
+    treated as done -- it should be retried on the next run, e.g. after the
+    Ollama server died mid-run and got restarted."""
+    preds_path = tmp_path / "preds.jsonl"
+    preds_path.write_text(
+        json.dumps({"utterance_id": "u1", "pred_label": "hap"})
+        + "\n"
+        + json.dumps({"utterance_id": "u2", "pred_label": None})
+        + "\n"
     )
     assert load_done_ids(preds_path) == {"u1"}
 

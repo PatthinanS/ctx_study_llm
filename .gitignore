@@ -1,4 +1,5 @@
 outputs/
+eval/
 data/
 __pycache__/
 *.pyc

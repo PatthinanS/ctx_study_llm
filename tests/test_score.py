@@ -1,6 +1,6 @@
 import json
 
-from src.score import build_categorical_subset, build_dimensional_arrays, score_run
+from src.score import build_categorical_subset, build_dimensional_arrays, load_preds, score_run
 
 RECORDS = [
     {
@@ -38,6 +38,25 @@ RECORDS = [
 ]
 
 
+def test_load_preds_dedupes_keeping_last_occurrence(tmp_path):
+    """A resumed run appends a fresh attempt for a previously-failed
+    utterance_id (see load_done_ids in src/run.py); scoring must use the
+    later (retried) record, not double-count both."""
+    run_dir = tmp_path / "fake_run"
+    run_dir.mkdir()
+    with open(run_dir / "preds.jsonl", "w") as f:
+        f.write(json.dumps({"utterance_id": "u1", "pred_label": None}) + "\n")
+        f.write(json.dumps({"utterance_id": "u1", "pred_label": "hap"}) + "\n")
+        f.write(json.dumps({"utterance_id": "u2", "pred_label": "neu"}) + "\n")
+
+    records = load_preds(run_dir)
+
+    assert len(records) == 2
+    by_id = {r["utterance_id"]: r for r in records}
+    assert by_id["u1"]["pred_label"] == "hap"
+    assert by_id["u2"]["pred_label"] == "neu"
+
+
 def test_categorical_subset_excludes_null_gold_and_null_pred():
     gold, pred, counts = build_categorical_subset(RECORDS)
     assert gold == ["ang", "neu"]
@@ -63,9 +82,12 @@ def test_score_run_writes_metrics_json_structure(tmp_path):
         for rec in RECORDS:
             f.write(json.dumps(rec) + "\n")
 
-    result = score_run(run_dir)
+    eval_dir = tmp_path / "eval"
+    result = score_run(run_dir, eval_dir)
 
-    assert (run_dir / "metrics.json").exists()
+    metrics_path = eval_dir / "fake_run" / "metrics.json"
+    assert metrics_path.exists()
+    assert not (run_dir / "metrics.json").exists()
     assert set(result) == {"run_meta_summary", "categorical", "dimensional"}
     assert set(result["categorical"]) >= {
         "n_scored",
@@ -87,6 +109,6 @@ def test_score_run_writes_metrics_json_structure(tmp_path):
         "granularity",
     }
 
-    with open(run_dir / "metrics.json") as f:
+    with open(metrics_path) as f:
         on_disk = json.load(f)
     assert on_disk == result

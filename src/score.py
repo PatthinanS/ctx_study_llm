@@ -28,14 +28,21 @@ from src.metrics import (
 
 
 def load_preds(run_dir: Path) -> list[dict]:
+    """Load preds.jsonl, deduping by utterance_id (last write wins).
+
+    A resumed run appends a fresh attempt for any utterance_id whose prior
+    attempt failed (see src/run.py's load_done_ids), so the same id can
+    appear more than once -- the later record reflects the retry.
+    """
     preds_path = run_dir / "preds.jsonl"
-    records = []
+    records: dict[str, dict] = {}
     with open(preds_path) as f:
         for line in f:
             line = line.strip()
             if line:
-                records.append(json.loads(line))
-    return records
+                rec = json.loads(line)
+                records[rec["utterance_id"]] = rec
+    return list(records.values())
 
 
 def build_categorical_subset(records: list[dict]) -> tuple[list[str], list[str], dict]:
@@ -81,7 +88,7 @@ def build_dimensional_arrays(records: list[dict]) -> tuple[np.ndarray, np.ndarra
     return preds_arr, golds_arr, counts
 
 
-def score_run(run_dir: Path) -> dict:
+def _score_run(run_dir: Path) -> dict:
     records = load_preds(run_dir)
 
     meta = {}
@@ -129,9 +136,15 @@ def score_run(run_dir: Path) -> dict:
 
     result = {"run_meta_summary": meta, "categorical": categorical, "dimensional": dimensional}
 
-    with open(run_dir / "metrics.json", "w") as f:
-        json.dump(result, f, indent=2)
+    return result
 
+
+def score_run(run_dir: Path, eval_dir: Path = Path("eval")) -> dict:
+    result = _score_run(run_dir)
+    out_dir = eval_dir / run_dir.name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "metrics.json", "w") as f:
+        json.dump(result, f, indent=2)
     return result
 
 
@@ -167,12 +180,14 @@ def print_summary(result: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", required=True)
+    parser.add_argument("--eval-dir", default="eval")
     args = parser.parse_args()
 
     run_dir = Path(args.run)
-    result = score_run(run_dir)
+    eval_dir = Path(args.eval_dir)
+    result = score_run(run_dir, eval_dir)
     print_summary(result)
-    print(f"Wrote {run_dir / 'metrics.json'}")
+    print(f"Wrote {eval_dir / run_dir.name / 'metrics.json'}")
 
 
 if __name__ == "__main__":

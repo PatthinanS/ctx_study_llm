@@ -92,7 +92,14 @@ def resolve_render_fn(cfg: dict) -> Callable[[dict, list[dict]], str]:
 
 
 def load_done_ids(preds_path: Path) -> set[str]:
-    """Read existing preds.jsonl, tolerating a corrupt/truncated trailing line."""
+    """Read existing preds.jsonl, tolerating a corrupt/truncated trailing line.
+
+    Only rows with a successful (non-null) pred_label count as done -- rows
+    that failed even after retry (e.g. the Ollama server died mid-run) are
+    left out so they get retried on the next invocation, without needing to
+    wipe the whole file. src/score.py's load_preds() dedupes by
+    utterance_id (last write wins) to handle the resulting re-attempt rows.
+    """
     done: set[str] = set()
     if not preds_path.exists():
         return done
@@ -106,7 +113,7 @@ def load_done_ids(preds_path: Path) -> set[str]:
             except json.JSONDecodeError:
                 continue
             uid = rec.get("utterance_id")
-            if uid is not None:
+            if uid is not None and rec.get("pred_label") is not None:
                 done.add(uid)
     return done
 

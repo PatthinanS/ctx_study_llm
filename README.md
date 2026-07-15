@@ -76,8 +76,12 @@ Runs are resumable: interrupting and rerunning the same command skips utterance_
 outputs/<experiment_name>/
   preds.jsonl    # one JSON record per utterance
   run_meta.json  # full config, system prompt, model, ollama version, timestamp, git commit
+
+eval/<experiment_name>/
   metrics.json   # written by src.score, categorical + dimensional blocks
 ```
+
+`src.score` reads from `outputs/<experiment_name>/` but writes derived scoring results separately, to `eval/<experiment_name>/` — override the eval location with `--eval-dir <path>` if needed.
 
 ## Testing
 
