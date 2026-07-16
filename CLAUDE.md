@@ -41,9 +41,13 @@ The fix was downgrading to `0.22.0` (confirmed working via a real `ollama run` c
 
 ## Architecture / extensibility seam
 
-`condition` (which prompt template — `src/prompts.py`) is deliberately decoupled from `context.strategy` (which turns get selected — `src/data.py`'s `STRATEGY_REGISTRY`). This is why config has two separate fields instead of one combined mode string:
+`condition` (which prompt template/record shape — `src/prompts.py`) is deliberately decoupled from `context.strategy` (which turns get selected — `src/data.py`'s `STRATEGY_REGISTRY`). This is why config has two separate fields instead of one combined mode string.
 
-- **C2 (retrieval)**, when added: one new `STRATEGY_REGISTRY` entry in `data.py` with the same `(utterance, history, k, **kwargs) -> list[dict]` signature as `_strategy_window`. Reuses the existing C1 prompt template unchanged — no `prompts.py` edit needed.
+- **C2 (retrieval), implemented**: `condition: "C2"` is a genuinely new, distinct condition value — **not** `condition: "C1"` with a new strategy, despite what an earlier version of this file and README.md said. Two things forced that: every C2 record needs extra `preds.jsonl` fields (`selected_indices`, `pool_size`) that C0/C1 records don't carry, and C2c's two-Ollama-call-per-utterance flow doesn't fit the single-string `render_fn(row, history) -> str` contract that `resolve_render_fn`/`process_one` are built around. `src/run.py`'s `main()` branches on `condition` in two places (the `--dry-run` block and the thread-pool submit block) to pick between the untouched C0/C1 path and the new C2 path (`resolve_c2_process_fn` → `process_one_c2ab` for `random`/`sim`, `process_one_c2c` for `llm_select`) — C0/C1 code is not modified.
+  - `random`/`sim` are ordinary `STRATEGY_REGISTRY` entries (`_strategy_random`, `_strategy_sim` in `data.py`), reusing the existing C1 template unchanged (`build_user_prompt_c1`). `selected_indices` is derived generically from any registered strategy's return value by mapping each returned turn's `utterance_id` back to its position in `history` — no need for a strategy function to return indices itself.
+  - `llm_select` (C2c) is deliberately **not** a `STRATEGY_REGISTRY` entry — its stage-1 selection call needs `cfg["model"]`/`judge_model`/retry/fallback state that a pure `(utterance, history, k, **kwargs) -> list[dict]` function can't carry back to the caller, so it's implemented directly in `run.py` (`select_stage1`, `process_one_c2c`).
+  - `_strategy_sim`'s embedding cache (`_EMBED_CACHE` in `data.py`) is lock-guarded (`_EMBED_LOCK`) because `main()`'s `ThreadPoolExecutor` can call the strategy for multiple utterances concurrently. "Embed each dialogue once" only means "never re-embed an already-embedded turn" — a strategy call only ever sees prior turns + the current utterance, never the full future dialogue, so there's no way to batch a whole dialogue upfront. `_encode_batch` is the sole function touching `torch`/`transformers` (imported lazily inside it), and is the seam tests monkeypatch to avoid any real model load.
+  - `c2_sim` fetches `xlm-roberta-base` from the Hugging Face Hub over HTTPS on first use — unlike Ollama models, this isn't provisioned by `setup.sh`. If the remote box lacks outbound network access, this fails on first `c2_sim` invocation; verify with a real `AutoModel.from_pretrained("xlm-roberta-base")` call before relying on it there (same "verify with a real call, not a presence check" lesson as the Ollama runner-binary issue above).
 - **C3 (LoRA factorial)**, when added: just a new `model` string in a config pointing at an Ollama model built from a LoRA adapter. No code change anywhere — `model` already threads straight into `ollama.chat(model=cfg["model"], ...)`, and `run_meta.json` already logs it per run.
 
 Don't collapse `condition` and `context.strategy` back into one field — that's what keeps both extensions restructuring-free.
@@ -67,8 +71,22 @@ python -m src.run --config configs/c0_mistral.json
 python -m src.run --config configs/c1_mistral.json
 python -m src.score --run outputs/c0_mistral
 python -m src.score --run outputs/c1_mistral
+
+# C2 (retrieval): random / sim / llm_select, val + test twins
+python -m src.run --config configs/c2_llm_llama31_val.json --dry-run
+python -m src.run --config configs/c2_random_llama31_val.json --smoke
+python -m src.run --config configs/c2_sim_llama31_val.json --smoke
+python -m src.run --config configs/c2_llm_llama31_val.json --smoke
+python -m src.run --config configs/c2_random_llama31_val.json
+python -m src.run --config configs/c2_sim_llama31_val.json
+python -m src.run --config configs/c2_llm_llama31_val.json
+python -m src.score --run outputs/c2_random_llama31_val
+python -m src.score --run outputs/c2_sim_llama31_val
+python -m src.score --run outputs/c2_llm_llama31_val
+python -m src.score --run outputs/c2_llm_llama31_val --compare-selections outputs/c2_sim_llama31_val
+python -m src.score --run outputs/c2_sim_llama31_val --compare-selections
 ```
 
 ## Testing
 
-`pytest tests/` needs no live Ollama server — `ollama.chat`/`ollama.list` are mocked where exercised (see `tests/test_run_resume.py` for the `unittest.mock.patch("ollama.chat", ...)` pattern to follow for any new Ollama-touching code). The split-parity test (`Session5` == 2195 rows) auto-skips if `data/iemocap/iemocap_merged_all.csv` isn't present.
+`pytest tests/` needs no live Ollama server — `ollama.chat`/`ollama.list` are mocked where exercised (see `tests/test_run_resume.py` for the `unittest.mock.patch("ollama.chat", ...)` pattern to follow for any new Ollama-touching code; `tests/test_c2_llm.py` follows the same pattern for C2c's stage-1 selection call). The split-parity test (`Session5` == 2195 rows) auto-skips if `data/iemocap/iemocap_merged_all.csv` isn't present. C2b's `_strategy_sim` tests monkeypatch `src.data._encode_batch` directly (see `tests/test_data.py`) so they need neither `torch`/`transformers` to be installed nor network access.

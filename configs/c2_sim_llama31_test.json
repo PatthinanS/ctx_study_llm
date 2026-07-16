@@ -1,0 +1,25 @@
+{
+  "experiment_name": "c2_sim_llama31_test",
+  "model": "llama3.1:8b",
+  "csv_path": "data/iemocap/iemocap_merged_all.csv",
+  "splits": {
+    "test_session": "Session5",
+    "val_session": "Session4",
+    "train_sessions": ["Session1", "Session2", "Session3"]
+  },
+  "condition": "C2",
+  "context": {
+    "strategy": "sim",
+    "k": 4,
+    "strategy_kwargs": {
+      "encoder": "xlm-roberta-base"
+    }
+  },
+  "labels": ["ang", "hap", "exc", "neu", "sad", "fru"],
+  "output_dir": "outputs",
+  "temperature": 0,
+  "seed": 42,
+  "max_eval": null,
+  "concurrency": 4,
+  "eval_split": "test"
+}

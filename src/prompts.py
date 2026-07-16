@@ -68,3 +68,47 @@ RESPONSE_SCHEMA = {
     },
     "required": ["label", "vad"],
 }
+
+
+SELECTION_SYSTEM_PROMPT = """You are selecting which prior conversation turns to give to a downstream emotion-recognition annotator as context for a single TARGET utterance.
+
+TASK: You will see all prior turns of the dialogue, each numbered with its pool index in brackets (e.g. "[0] SPEAKER: text"), followed by the TARGET utterance. Select exactly N of the numbered prior turns that are most useful for inferring the TARGET speaker's emotional state in the TARGET utterance.
+
+Judge usefulness by EMOTIONAL RELEVANCE ONLY -- e.g. turns that reveal a mood shift, an emotional trigger, or the speaker's affective trajectory leading into the TARGET line. Do NOT select turns merely because they discuss the same topic or share vocabulary with the TARGET utterance; topical similarity is not the criterion.
+
+OUTPUT FORMAT: Respond with JSON only, matching the required schema exactly (a "selected" array of exactly N distinct pool indices, each in range). No prose, no explanation, no markdown fences."""
+
+
+def build_user_prompt_selection(history: list[dict], speaker: str, text: str, n_sel: int) -> str:
+    """Numbered-pool selection prompt for C2c stage 1.
+
+    history: list of {"speaker": ..., "text": ...} dicts, chronological --
+    the same pool a context strategy would receive. Assumes history is
+    non-empty (caller only invokes this when pool_size > n_sel, which
+    implies pool_size >= 1).
+    """
+    lines = "\n".join(f"[{i}] {t['speaker']}: {t['text']}" for i, t in enumerate(history))
+    return (
+        f"Prior turns (pool indices in brackets):\n{lines}\n\n"
+        f'TARGET {speaker}: "{text}"\n\n'
+        f"Select exactly {n_sel} of the numbered prior turn indices above that are most useful for "
+        f"inferring {speaker}'s emotional state in the TARGET utterance. Judge by emotional relevance, "
+        "not topical similarity."
+    )
+
+
+def build_selection_schema(n_sel: int) -> dict:
+    """Dynamic JSON schema, minItems==maxItems==n_sel per call (n_sel varies
+    per utterance since it's min(cfg k, pool_size))."""
+    return {
+        "type": "object",
+        "properties": {
+            "selected": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": n_sel,
+                "maxItems": n_sel,
+            }
+        },
+        "required": ["selected"],
+    }

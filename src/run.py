@@ -29,9 +29,12 @@ from src.data import (
 )
 from src.prompts import (
     RESPONSE_SCHEMA,
+    SELECTION_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
+    build_selection_schema,
     build_user_prompt_c0,
     build_user_prompt_c1,
+    build_user_prompt_selection,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -57,6 +60,7 @@ def load_config(path: str) -> dict:
         raise ValueError(f"Config missing required fields: {sorted(missing)}")
     cfg.setdefault("max_eval", None)
     cfg.setdefault("concurrency", 1)
+    cfg.setdefault("eval_split", "test")  # "val" | "test"; C0/C1 configs lack this -> unchanged
     return cfg
 
 
@@ -220,6 +224,172 @@ def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: d
     }
 
 
+def _extract_gold_fields(row: dict) -> tuple[str | None, dict]:
+    """Gold label/VAD extraction shared by the C2 process functions below.
+
+    Factored out of process_one's inline logic rather than refactoring
+    process_one itself, so C0/C1 behavior/code stays untouched.
+    """
+    gold_label = row["emotion"] if is_categorical_usable(row) else None
+    gold_vad = {
+        "v": _nan_to_none(row["valence"]),
+        "a": _nan_to_none(row["arousal"]),
+        "d": _nan_to_none(row["dominance"]),
+    }
+    return gold_label, gold_vad
+
+
+def process_one_c2ab(
+    row: dict, history: list[dict], cfg: dict, strategy: str, k: int, kwargs: dict, options: dict
+) -> dict:
+    """C2a ("random") / C2b ("sim") single-call path.
+
+    Pool == history (all prior turns of the current dialogue). Reuses the
+    existing C1 template + dual-output call unchanged; adds selected_indices
+    (pool indices into history) and pool_size to the record.
+    """
+    pool_size = len(history)
+    turns = build_context(strategy, row, history, k, **kwargs)
+    id_to_idx = {h["utterance_id"]: i for i, h in enumerate(history)}
+    selected_indices = [id_to_idx[t["utterance_id"]] for t in turns]
+
+    user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
+    gold_label, gold_vad = _extract_gold_fields(row)
+    pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    )
+
+    return {
+        "utterance_id": row["utterance_id"],
+        "condition": cfg["condition"],
+        "model": cfg["model"],
+        "gold_label": gold_label,
+        "gold_vad": gold_vad,
+        "pred_label": pred_label,
+        "pred_vad": pred_vad,
+        "latency_ms": latency_ms,
+        "raw_response": raw,
+        "selected_indices": selected_indices,
+        "pool_size": pool_size,
+    }
+
+
+def _validate_selection(parsed, n_sel: int, pool_size: int) -> list[int] | None:
+    """Indices must be unique ints in [0, pool_size), exactly n_sel of them."""
+    if not isinstance(parsed, dict):
+        return None
+    sel = parsed.get("selected")
+    if not isinstance(sel, list) or len(sel) != n_sel:
+        return None
+    if any(not isinstance(i, int) or isinstance(i, bool) for i in sel):
+        return None
+    if len(set(sel)) != len(sel):
+        return None
+    if any(i < 0 or i >= pool_size for i in sel):
+        return None
+    return sel
+
+
+def select_stage1(row: dict, history: list[dict], cfg: dict, k: int, kwargs: dict, options: dict) -> dict:
+    """C2c stage 1: one Ollama call to pick n_sel prior-turn indices.
+
+    Returns a dict with selected_indices, fallback, stage1_skipped,
+    stage1_latency_ms, stage1_raw_response. Never raises. On repeated
+    invalid/failed output, falls back to the last n_sel turns (recency).
+    """
+    pool_size = len(history)
+    n_sel = min(k, pool_size)
+
+    if pool_size <= n_sel:
+        return {
+            "selected_indices": list(range(pool_size)),
+            "fallback": False,
+            "stage1_skipped": True,
+            "stage1_latency_ms": 0.0,
+            "stage1_raw_response": None,
+        }
+
+    judge_model = kwargs.get("judge_model", cfg["model"])
+    schema = build_selection_schema(n_sel)
+    user_prompt = build_user_prompt_selection(history, row["speaker"], row["text"], n_sel)
+
+    latency_ms = 0.0
+    raw = ""
+    for _attempt in range(2):
+        parsed, raw, latency_ms = call_ollama_once(
+            judge_model, SELECTION_SYSTEM_PROMPT, user_prompt, options, schema
+        )
+        indices = _validate_selection(parsed, n_sel, pool_size)
+        if indices is not None:
+            return {
+                "selected_indices": sorted(indices),
+                "fallback": False,
+                "stage1_skipped": False,
+                "stage1_latency_ms": latency_ms,
+                "stage1_raw_response": raw,
+            }
+
+    fallback_indices = list(range(pool_size - n_sel, pool_size))  # recency
+    return {
+        "selected_indices": fallback_indices,
+        "fallback": True,
+        "stage1_skipped": False,
+        "stage1_latency_ms": latency_ms,
+        "stage1_raw_response": raw,
+    }
+
+
+def process_one_c2c(row: dict, history: list[dict], cfg: dict, k: int, kwargs: dict, options: dict) -> dict:
+    """C2c ("llm_select") two-stage path: LLM-judged selection, then the
+    existing dual-output prediction call with the selected turns as context."""
+    pool_size = len(history)
+    stage1 = select_stage1(row, history, cfg, k, kwargs, options)
+    selected_indices = sorted(stage1["selected_indices"])
+    turns = [history[i] for i in selected_indices]
+
+    user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
+    gold_label, gold_vad = _extract_gold_fields(row)
+    pred_label, pred_vad, stage2_latency_ms, raw = call_ollama_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    )
+
+    return {
+        "utterance_id": row["utterance_id"],
+        "condition": cfg["condition"],
+        "model": cfg["model"],
+        "gold_label": gold_label,
+        "gold_vad": gold_vad,
+        "pred_label": pred_label,
+        "pred_vad": pred_vad,
+        "latency_ms": stage2_latency_ms,
+        "raw_response": raw,
+        "selected_indices": selected_indices,
+        "pool_size": pool_size,
+        "fallback": stage1["fallback"],
+        "stage1_skipped": stage1["stage1_skipped"],
+        "stage1_latency_ms": stage1["stage1_latency_ms"],
+        "stage2_latency_ms": stage2_latency_ms,
+        "stage1_raw_response": stage1["stage1_raw_response"],
+    }
+
+
+def resolve_c2_process_fn(cfg: dict, options: dict):
+    """Build a (row, history) -> record closure for condition=="C2",
+    dispatching on context.strategy."""
+    strategy = cfg["context"]["strategy"]
+    k = cfg["context"].get("k", 4)
+    kwargs = dict(cfg["context"].get("strategy_kwargs", {}))
+
+    if strategy == "random":
+        kwargs.setdefault("seed", cfg["seed"])
+        return lambda row, history: process_one_c2ab(row, history, cfg, strategy, k, kwargs, options)
+    if strategy == "sim":
+        return lambda row, history: process_one_c2ab(row, history, cfg, strategy, k, kwargs, options)
+    if strategy == "llm_select":
+        return lambda row, history: process_one_c2c(row, history, cfg, k, kwargs, options)
+    raise ValueError(f"Unknown C2 context.strategy '{strategy}'")
+
+
 def write_run_meta(output_dir: Path, cfg: dict) -> None:
     try:
         version_out = subprocess.run(
@@ -313,6 +483,71 @@ def dry_run_preview(rows: list[tuple[dict, list[dict]]], render_fn, cfg: dict) -
         print()
 
 
+def _pick_dry_run_samples_c2(rows: list[tuple[dict, list[dict]]], k: int):
+    samples = []
+    small_pool = next((r for r in rows if len(r[1]) <= k), None)
+    if small_pool is not None:
+        samples.append(("pool_size <= n_sel", small_pool))
+    big_pool = next((r for r in rows if len(r[1]) >= 20 and r is not small_pool), None)
+    if big_pool is not None:
+        samples.append(("20+ prior turns", big_pool))
+    for row, history in rows:
+        if len(samples) >= 3:
+            break
+        if (row, history) not in [s[1] for s in samples]:
+            samples.append(("additional case", (row, history)))
+    return samples[:3]
+
+
+def dry_run_preview_c2(rows: list[tuple[dict, list[dict]]], cfg: dict) -> None:
+    strategy = cfg["context"]["strategy"]
+    k = cfg["context"].get("k", 4)
+    kwargs = dict(cfg["context"].get("strategy_kwargs", {}))
+
+    print("=" * 80)
+    print("SYSTEM PROMPT (stage 2 / prediction):")
+    print(SYSTEM_PROMPT)
+    print("=" * 80)
+    if strategy == "llm_select":
+        print("SELECTION SYSTEM PROMPT (stage 1):")
+        print(SELECTION_SYSTEM_PROMPT)
+        print("=" * 80)
+
+    for label, (row, history) in _pick_dry_run_samples_c2(rows, k):
+        pool_size = len(history)
+        n_sel = min(k, pool_size)
+        print(f"--- {label} | utterance_id={row['utterance_id']} | pool_size={pool_size} | n_sel={n_sel} ---")
+
+        if strategy == "llm_select":
+            if pool_size <= n_sel:
+                print("[stage 1 SKIPPED: pool_size <= n_sel, all turns auto-selected]")
+                turns = history
+            else:
+                print("STAGE 1 PROMPT:")
+                print(build_user_prompt_selection(history, row["speaker"], row["text"], n_sel))
+                print("STAGE 1 SCHEMA:")
+                print(json.dumps(build_selection_schema(n_sel), indent=2))
+                print(
+                    "[NOTE: --dry-run makes no Ollama calls; the stage-2 context below uses "
+                    "a recency placeholder selection for illustration, not real stage-1 output]"
+                )
+                turns = history[-n_sel:]
+            print("STAGE 2 PROMPT:")
+        elif strategy == "random":
+            kw = dict(kwargs)
+            kw.setdefault("seed", cfg["seed"])
+            turns = build_context("random", row, history, k, **kw)
+            print("RENDERED PROMPT:")
+        elif strategy == "sim":
+            turns = build_context("sim", row, history, k, **kwargs)
+            print("RENDERED PROMPT:")
+        else:
+            raise ValueError(f"Unknown C2 context.strategy '{strategy}'")
+
+        print(build_user_prompt_c1(turns, row["speaker"], row["text"]))
+        print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -325,16 +560,23 @@ def main() -> None:
         cfg = apply_smoke(cfg)
 
     df = load_iemocap(cfg["csv_path"])
-    _train, _val, test_session = get_splits(cfg)
+    _train, val_session, test_session = get_splits(cfg)
+    session = val_session if cfg["eval_split"] == "val" else test_session
 
-    rows = list(iter_eval_rows(df, test_session))
+    rows = list(iter_eval_rows(df, session))
     if cfg.get("max_eval"):
         rows = rows[: cfg["max_eval"]]
 
-    render_fn = resolve_render_fn(cfg)
+    condition = cfg["condition"]
 
     if args.dry_run:
-        dry_run_preview(rows, render_fn, cfg)
+        if condition in ("C0", "C1"):
+            render_fn = resolve_render_fn(cfg)
+            dry_run_preview(rows, render_fn, cfg)
+        elif condition == "C2":
+            dry_run_preview_c2(rows, cfg)
+        else:
+            raise ValueError(f"Unknown condition '{condition}'")
         return
 
     ensure_ollama_reachable(cfg["model"])
@@ -368,13 +610,21 @@ def main() -> None:
     n_invalid_label = 0
     concurrency = max(1, cfg["concurrency"])
 
-    # Workers only compute (process_one does no file I/O); this thread writes
-    # every completed record as it arrives, so preds.jsonl writes stay
+    if condition in ("C0", "C1"):
+        render_fn = resolve_render_fn(cfg)
+        submit_fn = lambda row, history: process_one(row, history, cfg, render_fn, options)
+    elif condition == "C2":
+        submit_fn = resolve_c2_process_fn(cfg, options)
+    else:
+        raise ValueError(f"Unknown condition '{condition}'")
+
+    # Workers only compute (process_one/submit_fn do no file I/O); this thread
+    # writes every completed record as it arrives, so preds.jsonl writes stay
     # single-threaded and per-record-flushed regardless of concurrency.
     with open(preds_path, "a") as f:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [
-                executor.submit(process_one, row, history, cfg, render_fn, options)
+                executor.submit(submit_fn, row, history)
                 for row, history in remaining
             ]
             for future in tqdm(

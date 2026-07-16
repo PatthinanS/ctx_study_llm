@@ -4,3 +4,8 @@ numpy>=1.21.0
 scipy>=1.9.0
 tqdm>=4.62.0
 pytest>=7.0.0
+transformers>=4.30.0
+# CPU-only wheel: avoids pulling multi-GB CUDA packages on the no-root remote
+# box (see CLAUDE.md); this index also serves correct macOS/MPS wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0

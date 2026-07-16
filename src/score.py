@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +89,90 @@ def build_dimensional_arrays(records: list[dict]) -> tuple[np.ndarray, np.ndarra
     return preds_arr, golds_arr, counts
 
 
+def compute_cost_block(records: list[dict]) -> dict | None:
+    """Stage1/stage2 latency + fallback/skip rates, C2c ("llm_select") runs
+    only. Returns None (block omitted) if no record carries stage1 fields."""
+    if not any("stage1_latency_ms" in r for r in records):
+        return None
+    n = len(records)
+    stage1_lat = [r["stage1_latency_ms"] for r in records if r.get("stage1_latency_ms") is not None]
+    stage2_lat = [r["stage2_latency_ms"] for r in records if r.get("stage2_latency_ms") is not None]
+    n_fallback = sum(1 for r in records if r.get("fallback"))
+    n_skipped = sum(1 for r in records if r.get("stage1_skipped"))
+    return {
+        "n_records": n,
+        "stage1_latency_ms": {
+            "mean": statistics.mean(stage1_lat) if stage1_lat else float("nan"),
+            "total": sum(stage1_lat),
+        },
+        "stage2_latency_ms": {
+            "mean": statistics.mean(stage2_lat) if stage2_lat else float("nan"),
+            "total": sum(stage2_lat),
+        },
+        "fallback_rate": n_fallback / n if n else float("nan"),
+        "stage1_skipped_rate": n_skipped / n if n else float("nan"),
+    }
+
+
+def _recency_set(pool_size: int, n_sel: int) -> set[int]:
+    return set(range(pool_size - n_sel, pool_size))
+
+
+def _jaccard(a: set[int], b: set[int]) -> float:
+    if not a and not b:
+        return 1.0
+    return len(a & b) / len(a | b)
+
+
+def _mean_std(xs: list[float]) -> tuple[float, float]:
+    if not xs:
+        return float("nan"), float("nan")
+    return statistics.mean(xs), statistics.pstdev(xs)
+
+
+def compute_selection_overlap(primary_records: list[dict], compare_run_dirs: list[Path]) -> dict:
+    """Per-utterance Jaccard overlap between primary_records' selected_indices
+    and (a) the recency set, (b) each compare_run_dirs' selected_indices,
+    matched by utterance_id. Eligibility (pool_size > n_sel) is determined
+    from the primary run's own records; works for any C2 run (a/b/c) as the
+    primary, since only selected_indices/pool_size are required.
+    """
+    primary_by_id = {r["utterance_id"]: r for r in primary_records if "selected_indices" in r}
+    eligible_ids = [
+        uid for uid, r in primary_by_id.items() if r["pool_size"] > len(r["selected_indices"])
+    ]
+
+    recency_j = []
+    for uid in eligible_ids:
+        r = primary_by_id[uid]
+        sel = set(r["selected_indices"])
+        rec = _recency_set(r["pool_size"], len(sel))
+        recency_j.append(_jaccard(sel, rec))
+    mean_r, std_r = _mean_std(recency_j)
+
+    result = {
+        "n_eligible": len(eligible_ids),
+        "vs_recency": {"mean_jaccard": mean_r, "std_jaccard": std_r, "n": len(recency_j)},
+        "vs_compared_runs": {},
+    }
+    for other_dir in compare_run_dirs:
+        other_by_id = {r["utterance_id"]: r for r in load_preds(other_dir) if "selected_indices" in r}
+        pair_j = []
+        for uid in eligible_ids:
+            if uid not in other_by_id:
+                continue
+            sel_a = set(primary_by_id[uid]["selected_indices"])
+            sel_b = set(other_by_id[uid]["selected_indices"])
+            pair_j.append(_jaccard(sel_a, sel_b))
+        mean_o, std_o = _mean_std(pair_j)
+        result["vs_compared_runs"][other_dir.name] = {
+            "mean_jaccard": mean_o,
+            "std_jaccard": std_o,
+            "n": len(pair_j),
+        }
+    return result
+
+
 def _score_run(run_dir: Path) -> dict:
     records = load_preds(run_dir)
 
@@ -136,11 +221,22 @@ def _score_run(run_dir: Path) -> dict:
 
     result = {"run_meta_summary": meta, "categorical": categorical, "dimensional": dimensional}
 
+    cost = compute_cost_block(records)
+    if cost is not None:
+        result["cost"] = cost
+
     return result
 
 
-def score_run(run_dir: Path, eval_dir: Path = Path("eval")) -> dict:
+def score_run(
+    run_dir: Path,
+    eval_dir: Path = Path("eval"),
+    compare_selections: list[Path] | None = None,
+) -> dict:
     result = _score_run(run_dir)
+    if compare_selections is not None:
+        primary_records = load_preds(run_dir)
+        result["selection_overlap"] = compute_selection_overlap(primary_records, compare_selections)
     out_dir = eval_dir / run_dir.name
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "metrics.json", "w") as f:
@@ -177,16 +273,57 @@ def print_summary(result: dict) -> None:
     print("=" * 60)
 
 
+def print_cost_summary(cost: dict) -> None:
+    print("COST (C2c)")
+    print(f"  n_records={cost['n_records']}")
+    print(
+        f"  stage1_latency_ms: mean={cost['stage1_latency_ms']['mean']:.1f} "
+        f"total={cost['stage1_latency_ms']['total']:.1f}"
+    )
+    print(
+        f"  stage2_latency_ms: mean={cost['stage2_latency_ms']['mean']:.1f} "
+        f"total={cost['stage2_latency_ms']['total']:.1f}"
+    )
+    print(f"  fallback_rate={cost['fallback_rate']:.4f}  stage1_skipped_rate={cost['stage1_skipped_rate']:.4f}")
+    print("=" * 60)
+
+
+def print_selection_overlap_summary(overlap: dict) -> None:
+    print("SELECTION OVERLAP")
+    print(f"  n_eligible={overlap['n_eligible']}")
+    vr = overlap["vs_recency"]
+    print(f"  vs_recency: mean_jaccard={vr['mean_jaccard']:.4f} std={vr['std_jaccard']:.4f} n={vr['n']}")
+    for name, stats in overlap["vs_compared_runs"].items():
+        print(
+            f"  vs_{name}: mean_jaccard={stats['mean_jaccard']:.4f} "
+            f"std={stats['std_jaccard']:.4f} n={stats['n']}"
+        )
+    print("=" * 60)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", required=True)
     parser.add_argument("--eval-dir", default="eval")
+    parser.add_argument(
+        "--compare-selections",
+        nargs="*",
+        default=None,
+        metavar="RUN_DIR",
+        help="Other C2 run dirs to compare selected_indices against via Jaccard overlap; "
+        "pass with no values to compute only the vs-recency overlap for --run itself.",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run)
     eval_dir = Path(args.eval_dir)
-    result = score_run(run_dir, eval_dir)
+    compare_dirs = [Path(p) for p in args.compare_selections] if args.compare_selections is not None else None
+    result = score_run(run_dir, eval_dir, compare_selections=compare_dirs)
     print_summary(result)
+    if "cost" in result:
+        print_cost_summary(result["cost"])
+    if "selection_overlap" in result:
+        print_selection_overlap_summary(result["selection_overlap"])
     print(f"Wrote {eval_dir / run_dir.name / 'metrics.json'}")
 
 

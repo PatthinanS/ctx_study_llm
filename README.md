@@ -1,6 +1,6 @@
 # ContextStudy_LLM — LLM Prompting Leg
 
-This is the LLM-prompting leg of an ERC (emotion recognition in conversation) research study, run via [Ollama](https://ollama.com). It is inference-only — no training — and is a sibling to the PLM (fine-tuning) leg at `ContextStudy_NewResearch`. Two conditions are implemented: **C0** (target utterance only, no context) and **C1** (last k=3 prior turns of the same dialogue as context). C2 (retrieval-based context) and C3 (LoRA factorial) are designed to slot in later without restructuring — see "Extending" below. Designed to run unattended on a remote Linux box (`./setup.sh` provisions everything, including the Ollama server itself); local macOS development also works.
+This is the LLM-prompting leg of an ERC (emotion recognition in conversation) research study, run via [Ollama](https://ollama.com). It is inference-only — no training — and is a sibling to the PLM (fine-tuning) leg at `ContextStudy_NewResearch`. Three conditions are implemented: **C0** (target utterance only, no context), **C1** (last k=4 prior turns of the same dialogue as context), and **C2** (retrieval-augmented context, three variants: `random`, `sim` cosine-similarity, `llm_select` LLM-judged selection — see "Extending" below). C3 (LoRA factorial) is designed to slot in later without restructuring. Designed to run unattended on a remote Linux box (`./setup.sh` provisions everything, including the Ollama server itself); local macOS development also works.
 
 Data conventions match the `ContextStudy_NewResearch` PLM repo exactly where it matters for comparability: leave-one-session-out splits (test=Session5, val=Session4, train=Sessions1-3) and the same source CSV/dialogue reconstruction (group by `(session, dialog)`, sort by `start_time`). The 6-way categorical filter (`LABELS = [ang, hap, exc, neu, sad, fru]`, excluding rows with `emotion` in `{xxx, sur, fea, dis, oth, ""}` or missing) is new to this repo — the PLM repo is VAD-regression only and has no categorical component. Dimensional (VAD) metrics are computed over the full test split (every row with a non-null gold VAD triple, since Session5 has a small number of rows with missing VAD annotations), while categorical metrics are computed only over the subset of rows with a usable gold label AND a valid model prediction.
 
@@ -70,6 +70,36 @@ python -m src.score --run outputs/c1_mistral
 
 Runs are resumable: interrupting and rerunning the same command skips utterance_ids already present in `outputs/<experiment_name>/preds.jsonl`.
 
+### C2 (retrieval-augmented context)
+
+```bash
+# Dry run (c2_llm also previews the stage-1 selection prompt/schema).
+python -m src.run --config configs/c2_random_llama31_val.json --dry-run
+python -m src.run --config configs/c2_sim_llama31_val.json --dry-run
+python -m src.run --config configs/c2_llm_llama31_val.json --dry-run
+
+# Smoke / full runs, same pattern as C0/C1.
+python -m src.run --config configs/c2_random_llama31_val.json --smoke
+python -m src.run --config configs/c2_sim_llama31_val.json --smoke
+python -m src.run --config configs/c2_llm_llama31_val.json --smoke
+
+python -m src.run --config configs/c2_random_llama31_val.json
+python -m src.run --config configs/c2_sim_llama31_val.json
+python -m src.run --config configs/c2_llm_llama31_val.json
+
+# Score, plus selection-overlap analysis (Jaccard vs. recency and vs. other
+# C2 runs, matched by utterance_id) for any run carrying selected_indices.
+python -m src.score --run outputs/c2_random_llama31_val
+python -m src.score --run outputs/c2_sim_llama31_val
+python -m src.score --run outputs/c2_llm_llama31_val
+python -m src.score --run outputs/c2_llm_llama31_val --compare-selections outputs/c2_sim_llama31_val
+python -m src.score --run outputs/c2_sim_llama31_val --compare-selections
+```
+
+`c2_sim` fetches `xlm-roberta-base` weights from the Hugging Face Hub on first use (needs outbound network access; not cached by `./setup.sh`).
+
+The `_val` configs run against the val session (Session4) via a top-level `"eval_split": "val"` config field (default `"test"` if omitted, matching C0/C1's existing behavior); `_test` twins of all three configs run against Session5.
+
 ## Output layout
 
 ```
@@ -93,5 +123,5 @@ No Ollama connection is required for the test suite. The split-parity test (`Ses
 
 ## Extending
 
-- **C2 (retrieval)**: add a new function to `STRATEGY_REGISTRY` in `src/data.py` with the same signature as `_strategy_window`, then add a config with `condition: "C1"` and `context.strategy: "retrieval"` — the existing C1 prompt template is reused unchanged.
+- **C2 (retrieval, implemented)**: `condition: "C2"` with `context.strategy` one of `"random"` (C2a, deterministic uniform sample via a hashlib-seeded RNG), `"sim"` (C2b, cosine similarity over `xlm-roberta-base` embeddings — encoder name configurable via `context.strategy_kwargs.encoder`), or `"llm_select"` (C2c, a two-stage flow: one Ollama call selects which prior turns to keep, judged by emotional relevance not topical similarity, then the existing C1 template + dual-output call runs on the selected context; judge model configurable via `context.strategy_kwargs.judge_model`, default same as the prediction model). Every C2 record additionally carries `selected_indices`/`pool_size`; C2c records also carry `fallback`/`stage1_skipped`/`stage1_latency_ms`/`stage2_latency_ms`/`stage1_raw_response`. `src.score --compare-selections` computes Jaccard overlap between any two C2 runs' selections (and against a recency baseline).
 - **C3 (LoRA factorial)**: add a new config with a different `model` tag (an Ollama model built from a LoRA-adapted GGUF). No code changes are needed — `model` is threaded straight into the Ollama call, and `run_meta.json` already logs the exact model string per run for traceability.
