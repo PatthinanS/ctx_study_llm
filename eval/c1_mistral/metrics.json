@@ -1,0 +1,55 @@
+{
+  "run_meta_summary": {
+    "experiment_name": "c1_mistral",
+    "model": "mistral:7b-instruct-q4_K_M",
+    "condition": "C1"
+  },
+  "categorical": {
+    "n_scored": 0,
+    "n_excluded": 571,
+    "n_invalid": 1622,
+    "accuracy": NaN,
+    "macro_f1": NaN,
+    "per_class_f1": {},
+    "confusion_matrix": {
+      "labels": [
+        "ang",
+        "hap",
+        "exc",
+        "neu",
+        "sad",
+        "fru"
+      ],
+      "matrix": []
+    }
+  },
+  "dimensional": {
+    "n_total_rows": 2193,
+    "n_nan_gold_dropped": 23,
+    "n_pred_invalid_dropped": 2170,
+    "n_scored": 0,
+    "pearson": {
+      "v": NaN,
+      "a": NaN,
+      "d": NaN,
+      "mean": NaN
+    },
+    "rmse": {
+      "v": NaN,
+      "a": NaN,
+      "d": NaN,
+      "mean": NaN
+    },
+    "mae": {
+      "v": NaN,
+      "a": NaN,
+      "d": NaN,
+      "mean": NaN
+    },
+    "granularity": {
+      "v": 0,
+      "a": 0,
+      "d": 0
+    }
+  }
+}
