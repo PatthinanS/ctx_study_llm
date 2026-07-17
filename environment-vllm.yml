@@ -1,0 +1,28 @@
+name: venv-vllm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      # Pinned for Turing (sm_75, Quadro RTX 5000) support: no native bf16
+      # (Llama 3.1's config ships as bf16), no FlashAttention 2 (needs
+      # Ampere+) -- 0.7.3 still falls back to the XFormers attention
+      # backend gracefully on Turing (expect a startup warning about this,
+      # not a failure); newer vLLM's V1 engine has progressively weaker
+      # Turing support. Its CUDA-12.1-default wheel also happens to align
+      # with driver 535.154.05 (CUDA 12.2), though CUDA minor-version
+      # compat means that alignment wasn't strictly required -- Turing
+      # support is the real reason for this pin. See CLAUDE.md.
+      - vllm==0.7.3
+
+# This env is for running `vllm serve ...` only -- src/run.py itself never
+# imports vllm, it talks to the server over HTTP via `requests` (installed
+# in the main `venv` env via requirements.txt). Keeping vLLM's pinned CUDA
+# torch build out of the main env avoids conflicting with the CPU-only
+# torch already pinned there for src/data.py's C2b embedding strategy.
+#
+# Server invocation (see CLAUDE.md for the full rationale on each flag):
+#   conda activate venv-vllm
+#   vllm serve <model> --tensor-parallel-size 2 --dtype float16 \
+#       --max-model-len 8192 --port 8000

@@ -1,0 +1,25 @@
+{
+  "experiment_name": "c0_vllm_llama31_val",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "backend": "vllm",
+  "vllm_base_url": "http://127.0.0.1:8000",
+  "csv_path": "data/iemocap/iemocap_merged_all.csv",
+  "splits": {
+    "test_session": "Session5",
+    "val_session": "Session4",
+    "train_sessions": ["Session1", "Session2", "Session3"]
+  },
+  "condition": "C0",
+  "context": {
+    "strategy": "none",
+    "k": 0,
+    "strategy_kwargs": {}
+  },
+  "labels": ["ang", "hap", "exc", "neu", "sad", "fru"],
+  "output_dir": "outputs",
+  "temperature": 0,
+  "seed": 42,
+  "max_eval": null,
+  "concurrency": 16,
+  "eval_split": "val"
+}

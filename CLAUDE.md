@@ -52,10 +52,25 @@ The fix was downgrading to `0.22.0` (confirmed working via a real `ollama run` c
 
 Don't collapse `condition` and `context.strategy` back into one field — that's what keeps both extensions restructuring-free.
 
+## Backend: Ollama (default) vs. vLLM (selectable, `vllm-backend` branch)
+
+`condition`/`context.strategy` select *what* gets run; the orthogonal `backend` config field (`"ollama"` default, or `"vllm"`) selects *which server* runs it. This exists because the remote box's NVIDIA driver (535.154.05, CUDA 12.2 ceiling) can't run conda-forge's `ollama` CUDA builds (only ship `cuda_129`/`cuda_130`), so a 36-hour CPU-only C2 run motivated pulling `meta-llama/Llama-3.1-8B-Instruct` straight from Hugging Face and serving it via vLLM instead, on the box's 2x idle Quadro RTX 5000 (16GB each).
+
+- **Dispatcher, not a rewrite**: `call_ollama_once`/`call_ollama_with_retry`/`ensure_ollama_reachable` are completely untouched. `call_llm_once`/`call_llm_with_retry`/`ensure_backend_reachable` are new thin wrappers that branch on `cfg.get("backend", "ollama")`; the 4 call sites (`process_one`, `process_one_c2ab`, `select_stage1`, `process_one_c2c`) call the dispatcher instead of the Ollama functions directly, passing `cfg` through (all 4 already had `cfg` available). Any config without a `"backend"` key — i.e. all pre-existing configs — behaves byte-for-byte identically to before this existed.
+- **vLLM runs as its own server** (`vllm serve ...`), same shape as `ollama serve`. `src/run.py` talks to it over HTTP via `requests` against the OpenAI-compatible `/v1/chat/completions` endpoint — it does **not** import the `vllm` package. vLLM's own (heavy, CUDA-pinned) dependencies live in a **separate** conda env (`environment-vllm.yml`, `venv-vllm`), kept out of the main `venv`/`requirements.txt` specifically so they can't conflict with the CPU-only `torch` already pinned there for C2b's embedding strategy.
+- **`vllm==0.7.3` is pinned for Turing GPU support, not primarily for CUDA-version reasons.** The Quadro RTX 5000 is Turing (sm_75): no native bfloat16 (Llama 3.1's config ships bf16 by default) and no FlashAttention 2 (needs Ampere+). vLLM 0.7.3 falls back to the XFormers attention backend gracefully on Turing — **a startup warning about this is expected, not a failure** — while newer vLLM's V1 engine has progressively weaker Turing support. Its CUDA-12.1-default wheel (last release before a Feb 27 2025 PR switched the PyPI default to CUDA 12.4) happens to also satisfy the 12.2 driver ceiling, but that's a secondary bonus, not the reason for the pin: CUDA minor-version compatibility means `cu124` wheels generally run fine on driver ≥525.60.13 too — only a CUDA **13** wheel would be a true driver-version wall.
+- **`vllm serve` invocation always needs three flags**, none optional:
+  - `--dtype float16` — Llama 3.1's config defaults to bf16; Turing can't do bf16 and vLLM 0.7.3 errors at startup instead of auto-downgrading.
+  - `--max-model-len 8192` (starting point; C1/C2's `k=4` context windows are short, this is generous headroom) — Llama 3.1 defaults to a 131072-token context, and vLLM pre-allocates KV cache sized for whatever `--max-model-len` is, which won't fit in the ~8GB/GPU left after model weights on `--tensor-parallel-size 2`. Tune with `--gpu-memory-utilization` if it still doesn't fit.
+  - `--tensor-parallel-size 2` — **not falling back to `--tensor-parallel-size 1`** if this misbehaves (RTX 5000s have no NVLink, PCIe-only NCCL can be finicky): fp16 8B weights alone are ~16GB, i.e. one entire card's VRAM, before KV cache/activations/CUDA context. If TP=2 doesn't work, the real fallback is a **4-bit quantized checkpoint (AWQ/GPTQ) on a single GPU**, not TP=1 at full precision.
+- **`guided_json` is the confirmed-correct structured-output param** for vLLM 0.7.x's OpenAI-compatible server (top-level request field, not nested under `extra_body` — that nesting is an `openai`-python-client-only concept, irrelevant to raw HTTP via `requests`). Kept isolated in `_guided_json_kwargs` regardless, so a future vLLM version needing a different shape (e.g. OpenAI-style `response_format={"type": "json_schema", ...}`) is a one-function fix.
+- **Ollama's per-call `options.num_ctx`/`num_predict` don't map onto vLLM the same way.** `num_predict` (max output tokens) has a direct equivalent — `max_tokens` in the request body — but no current config sets it (audited all pre-vLLM configs: none set anything beyond `temperature`/`seed`), so `_call_vllm_once` doesn't send it yet; add the mapping if a config ever needs it. `num_ctx` (context window) has **no per-request equivalent at all** in vLLM's API — context length is fixed server-side once, at `vllm serve` startup via `--max-model-len`, not adjustable per-call the way Ollama's `options` dict might suggest.
+- Gated HF model access (`meta-llama/Llama-3.1-8B-Instruct`) blocks using the official weights, but not environment/server verification — use the ungated mirror `NousResearch/Meta-Llama-3.1-8B-Instruct` (same weights) to unblock everything up through a working `vllm serve` + smoke completion while access clears.
+
 ## Invariants to preserve
 
-- `src/run.py`'s inference loop must never raise on a bad/missing/malformed Ollama response. One retry (`call_ollama_with_retry`), then record whatever's salvageable (nulls where invalid) and continue. A single bad utterance must never kill a multi-hour remote run.
-- `--dry-run` must stay completely Ollama-free (no import, no network call) — it's the fast local sanity check for prompt rendering. `ensure_ollama_reachable` is called in `main()` only after the dry-run early return.
+- `src/run.py`'s inference loop must never raise on a bad/missing/malformed LLM response, for either backend. One retry (`call_ollama_with_retry`/`_call_vllm_with_retry`), then record whatever's salvageable (nulls where invalid) and continue. A single bad utterance must never kill a multi-hour remote run.
+- `--dry-run` must stay completely network-free (no Ollama import/call, no `requests` call to a vLLM server either) — it's the fast local sanity check for prompt rendering. `ensure_backend_reachable` is called in `main()` only after the dry-run early return, for both backends.
 - `preds.jsonl` writes are flushed per record (resume safety — a killed process mid-run must not lose more than the in-flight utterance).
 
 ## Commands
@@ -85,8 +100,18 @@ python -m src.score --run outputs/c2_sim_llama31_val
 python -m src.score --run outputs/c2_llm_llama31_val
 python -m src.score --run outputs/c2_llm_llama31_val --compare-selections outputs/c2_sim_llama31_val
 python -m src.score --run outputs/c2_sim_llama31_val --compare-selections
+
+# vLLM backend (vllm-backend branch): server runs in its own env, separately
+conda activate venv-vllm
+vllm serve meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 2 --dtype float16 --max-model-len 8192 --port 8000
+# ... then, back in the main venv env:
+conda activate venv
+python -m src.run --config configs/c0_vllm_llama31_val.json --dry-run
+python -m src.run --config configs/c0_vllm_llama31_val.json --smoke
+python -m src.run --config configs/c0_vllm_llama31_val.json
+python -m src.score --run outputs/c0_vllm_llama31_val
 ```
 
 ## Testing
 
-`pytest tests/` needs no live Ollama server — `ollama.chat`/`ollama.list` are mocked where exercised (see `tests/test_run_resume.py` for the `unittest.mock.patch("ollama.chat", ...)` pattern to follow for any new Ollama-touching code; `tests/test_c2_llm.py` follows the same pattern for C2c's stage-1 selection call). The split-parity test (`Session5` == 2195 rows) auto-skips if `data/iemocap/iemocap_merged_all.csv` isn't present. C2b's `_strategy_sim` tests monkeypatch `src.data._encode_batch` directly (see `tests/test_data.py`) so they need neither `torch`/`transformers` to be installed nor network access.
+`pytest tests/` needs no live Ollama server and no live vLLM server — `ollama.chat`/`ollama.list` are mocked where exercised (see `tests/test_run_resume.py` for the `unittest.mock.patch("ollama.chat", ...)` pattern to follow for any new Ollama-touching code; `tests/test_c2_llm.py` follows the same pattern for C2c's stage-1 selection call; `tests/test_run_vllm.py` mocks `requests.post`/`requests.get` the same way for the vLLM backend, and includes a test proving a `backend`-less config never touches `requests` at all). The split-parity test (`Session5` == 2195 rows) auto-skips if `data/iemocap/iemocap_merged_all.csv` isn't present. C2b's `_strategy_sim` tests monkeypatch `src.data._encode_batch` directly (see `tests/test_data.py`) so they need neither `torch`/`transformers` to be installed nor network access.

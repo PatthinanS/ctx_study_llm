@@ -61,6 +61,10 @@ def load_config(path: str) -> dict:
     cfg.setdefault("max_eval", None)
     cfg.setdefault("concurrency", 1)
     cfg.setdefault("eval_split", "test")  # "val" | "test"; C0/C1 configs lack this -> unchanged
+    cfg.setdefault("backend", "ollama")  # "ollama" | "vllm"; existing configs lack this -> unchanged
+    cfg.setdefault("vllm_base_url", "http://127.0.0.1:8000")
+    if cfg["backend"] not in ("ollama", "vllm"):
+        raise ValueError(f"Unknown backend '{cfg['backend']}'. Must be 'ollama' or 'vllm'.")
     return cfg
 
 
@@ -194,6 +198,101 @@ def call_ollama_with_retry(
     return None, {"v": None, "a": None, "d": None}, latency_ms, raw
 
 
+# ---------------------------------------------------------------------------
+# vLLM backend (selectable alternative to Ollama, see CLAUDE.md) -- the
+# functions above (call_ollama_once, call_ollama_with_retry) are untouched;
+# call_llm_once/call_llm_with_retry below are the only new entry points call
+# sites use, dispatching on cfg.get("backend", "ollama").
+# ---------------------------------------------------------------------------
+
+
+def _guided_json_kwargs(schema: dict) -> dict:
+    """Extra request-body fields to force schema-constrained JSON output on
+    vLLM's OpenAI-compatible server: a top-level 'guided_json' field (not
+    nested under extra_body -- that nesting is an openai-python-client-only
+    concept; raw HTTP just puts vLLM-specific fields at the top level of the
+    JSON body). Isolated in its own function so if a different vLLM version
+    needs a different shape, only this function needs to change.
+    """
+    return {"guided_json": schema}
+
+
+def _call_vllm_once(
+    model: str, system: str, user: str, options: dict, schema: dict, base_url: str
+) -> tuple[dict | None, str, float]:
+    """Single vLLM chat call via its OpenAI-compatible /v1/chat/completions
+    endpoint. Returns (parsed_json_or_None, raw_content, latency_ms).
+
+    Never raises -- mirrors call_ollama_once's contract exactly.
+    """
+    import requests
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": options.get("temperature", 0),
+        "seed": options.get("seed"),
+        **_guided_json_kwargs(schema),
+    }
+    start = time.perf_counter()
+    raw = ""
+    try:
+        response = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=120)
+        response.raise_for_status()
+        body = response.json()
+        raw = body["choices"][0]["message"]["content"]
+        parsed = json.loads(raw)
+    except Exception as e:  # noqa: BLE001 -- must never crash the run
+        latency_ms = (time.perf_counter() - start) * 1000
+        return None, raw or f"<error: {e}>", latency_ms
+    latency_ms = (time.perf_counter() - start) * 1000
+    return parsed, raw, latency_ms
+
+
+def _call_vllm_with_retry(
+    model: str, system: str, user: str, options: dict, schema: dict, base_url: str
+) -> tuple[str | None, dict, float, str]:
+    """One retry on any failure or structural invalidity. Never raises.
+
+    Mirrors call_ollama_with_retry exactly, backend swapped.
+    """
+    for _attempt in range(2):
+        parsed, raw, latency_ms = _call_vllm_once(model, system, user, options, schema, base_url)
+        if parsed is not None:
+            pred_label, pred_vad = validate_and_clamp(parsed)
+            return pred_label, pred_vad, latency_ms, raw
+    return None, {"v": None, "a": None, "d": None}, latency_ms, raw
+
+
+def call_llm_once(
+    model: str, system: str, user: str, options: dict, schema: dict, cfg: dict
+) -> tuple[dict | None, str, float]:
+    """Backend dispatcher for a single call.
+
+    cfg.get("backend", "ollama") selects the provider -- missing/"ollama"
+    routes to the untouched call_ollama_once, so every existing config and
+    test (none of which set "backend") is completely unaffected by this
+    dispatcher's existence.
+    """
+    if cfg.get("backend", "ollama") == "vllm":
+        base_url = cfg.get("vllm_base_url", "http://127.0.0.1:8000")
+        return _call_vllm_once(model, system, user, options, schema, base_url)
+    return call_ollama_once(model, system, user, options, schema)
+
+
+def call_llm_with_retry(
+    model: str, system: str, user: str, options: dict, schema: dict, cfg: dict
+) -> tuple[str | None, dict, float, str]:
+    """Backend dispatcher for the retry-wrapped call. See call_llm_once."""
+    if cfg.get("backend", "ollama") == "vllm":
+        base_url = cfg.get("vllm_base_url", "http://127.0.0.1:8000")
+        return _call_vllm_with_retry(model, system, user, options, schema, base_url)
+    return call_ollama_with_retry(model, system, user, options, schema)
+
+
 def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: dict) -> dict:
     """Run one utterance through Ollama and build its preds.jsonl record.
 
@@ -207,8 +306,8 @@ def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: d
         "d": _nan_to_none(row["dominance"]),
     }
 
-    pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    pred_label, pred_vad, latency_ms, raw = call_llm_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -255,8 +354,8 @@ def process_one_c2ab(
 
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
-    pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    pred_label, pred_vad, latency_ms, raw = call_llm_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -316,8 +415,8 @@ def select_stage1(row: dict, history: list[dict], cfg: dict, k: int, kwargs: dic
     latency_ms = 0.0
     raw = ""
     for _attempt in range(2):
-        parsed, raw, latency_ms = call_ollama_once(
-            judge_model, SELECTION_SYSTEM_PROMPT, user_prompt, options, schema
+        parsed, raw, latency_ms = call_llm_once(
+            judge_model, SELECTION_SYSTEM_PROMPT, user_prompt, options, schema, cfg
         )
         indices = _validate_selection(parsed, n_sel, pool_size)
         if indices is not None:
@@ -349,8 +448,8 @@ def process_one_c2c(row: dict, history: list[dict], cfg: dict, k: int, kwargs: d
 
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
-    pred_label, pred_vad, stage2_latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA
+    pred_label, pred_vad, stage2_latency_ms, raw = call_llm_with_retry(
+        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -390,14 +489,37 @@ def resolve_c2_process_fn(cfg: dict, options: dict):
     raise ValueError(f"Unknown C2 context.strategy '{strategy}'")
 
 
-def write_run_meta(output_dir: Path, cfg: dict) -> None:
+def _get_ollama_version() -> str | None:
     try:
         version_out = subprocess.run(
             ["ollama", "--version"], capture_output=True, text=True, timeout=10
         )
-        ollama_version = version_out.stdout.strip() or version_out.stderr.strip()
+        return version_out.stdout.strip() or version_out.stderr.strip()
     except Exception:
-        ollama_version = None
+        return None
+
+
+def _get_vllm_info(cfg: dict) -> dict:
+    """Best-effort vLLM server metadata for run_meta.json traceability.
+
+    Never raises -- falls back to just the configured base_url on any
+    failure (server not up yet when write_run_meta runs, unexpected
+    response shape, etc.).
+    """
+    import requests
+
+    base_url = cfg.get("vllm_base_url", "http://127.0.0.1:8000")
+    try:
+        response = requests.get(f"{base_url}/version", timeout=10)
+        response.raise_for_status()
+        return {"vllm_base_url": base_url, **response.json()}
+    except Exception:
+        return {"vllm_base_url": base_url}
+
+
+def write_run_meta(output_dir: Path, cfg: dict) -> None:
+    backend = cfg.get("backend", "ollama")
+    backend_info = _get_vllm_info(cfg) if backend == "vllm" else None
 
     try:
         git_out = subprocess.run(
@@ -416,7 +538,9 @@ def write_run_meta(output_dir: Path, cfg: dict) -> None:
         "config": cfg,
         "system_prompt": SYSTEM_PROMPT,
         "model": cfg["model"],
-        "ollama_version": ollama_version,
+        "ollama_version": _get_ollama_version(),
+        "backend": backend,
+        "backend_info": backend_info,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit,
     }
@@ -452,6 +576,46 @@ def ensure_ollama_reachable(model: str) -> None:
             f"Run `ollama pull {model}` or ./setup.sh before this finishes.",
             file=sys.stderr,
         )
+
+
+def ensure_vllm_reachable(model: str, base_url: str) -> None:
+    """Fail fast with an actionable error if the vLLM server isn't up.
+
+    Never called on the --dry-run path. Mirrors ensure_ollama_reachable's
+    fail-fast-but-don't-self-heal shape: exits on unreachable server, only
+    warns (doesn't exit) on a served-model-id mismatch.
+    """
+    import requests
+
+    try:
+        response = requests.get(f"{base_url}/v1/models", timeout=10)
+        response.raise_for_status()
+        body = response.json()
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"ERROR: vLLM server not reachable at {base_url}.\n"
+            f"  ({e})\n"
+            "  Start it manually: `vllm serve <model> --tensor-parallel-size 2 "
+            "--dtype float16 --max-model-len 8192 --port 8000` (see CLAUDE.md).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    served_ids = {m.get("id") for m in body.get("data", [])}
+    if model not in served_ids:
+        print(
+            f"WARNING: server at {base_url} is not serving model '{model}' "
+            f"(serving: {sorted(served_ids)}). Restart vllm serve with the correct model.",
+            file=sys.stderr,
+        )
+
+
+def ensure_backend_reachable(cfg: dict) -> None:
+    """Backend dispatcher for the preflight reachability check."""
+    if cfg.get("backend", "ollama") == "vllm":
+        ensure_vllm_reachable(cfg["model"], cfg.get("vllm_base_url", "http://127.0.0.1:8000"))
+    else:
+        ensure_ollama_reachable(cfg["model"])
 
 
 def dry_run_preview(rows: list[tuple[dict, list[dict]]], render_fn, cfg: dict) -> None:
@@ -579,7 +743,7 @@ def main() -> None:
             raise ValueError(f"Unknown condition '{condition}'")
         return
 
-    ensure_ollama_reachable(cfg["model"])
+    ensure_backend_reachable(cfg)
 
     output_dir = Path(cfg["output_dir"]) / cfg["experiment_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
