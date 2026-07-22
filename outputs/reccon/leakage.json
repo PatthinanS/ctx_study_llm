@@ -1,0 +1,109 @@
+{
+  "_meta": {
+    "sessions": [
+      "Session1",
+      "Session2",
+      "Session3",
+      "Session4",
+      "Session5"
+    ],
+    "seed": 42,
+    "n_resamples": 10000
+  },
+  "c1_llama31": {
+    "funnel": {
+      "not_in_preds": 538,
+      "no_cause": 19,
+      "no_in_pool_cause": 12,
+      "forced_selection": 1,
+      "scoreable": 92,
+      "aligned": 662
+    },
+    "n_selections": 368,
+    "counts": {
+      "gold_cause": 133,
+      "visible_noncause": 116,
+      "invisible": 119
+    },
+    "rates": {
+      "gold_cause": 0.36141304347826086,
+      "visible_noncause": 0.31521739130434784,
+      "invisible": 0.3233695652173913
+    },
+    "vs_random_baseline": {
+      "observed_invisible_rate": 0.3233695652173913,
+      "baseline_invisible_rate": 0.31750954934511594,
+      "diff": 0.005860015872275368,
+      "diff_ci_lo": -0.031093375272052484,
+      "diff_ci_hi": 0.04299317953566912,
+      "n_resamples": 10000,
+      "seed": 42,
+      "n_targets": 92
+    },
+    "interpretation": "not distinguishable from random baseline (diff CI includes 0)"
+  },
+  "c2_random_llama31_test": {
+    "funnel": {
+      "not_in_preds": 538,
+      "no_cause": 19,
+      "no_in_pool_cause": 12,
+      "forced_selection": 1,
+      "scoreable": 92,
+      "aligned": 662
+    },
+    "n_selections": 368,
+    "counts": {
+      "gold_cause": 60,
+      "visible_noncause": 193,
+      "invisible": 115
+    },
+    "rates": {
+      "gold_cause": 0.16304347826086957,
+      "visible_noncause": 0.5244565217391305,
+      "invisible": 0.3125
+    },
+    "vs_random_baseline": {
+      "observed_invisible_rate": 0.3125,
+      "baseline_invisible_rate": 0.31750954934511594,
+      "diff": -0.0050095493451159405,
+      "diff_ci_lo": -0.0505117821595694,
+      "diff_ci_hi": 0.041430371406362757,
+      "n_resamples": 10000,
+      "seed": 42,
+      "n_targets": 92
+    },
+    "interpretation": "not distinguishable from random baseline (diff CI includes 0)"
+  },
+  "c2_sim_llama31_test": {
+    "funnel": {
+      "not_in_preds": 538,
+      "no_cause": 19,
+      "no_in_pool_cause": 12,
+      "forced_selection": 1,
+      "scoreable": 92,
+      "aligned": 662
+    },
+    "n_selections": 368,
+    "counts": {
+      "gold_cause": 75,
+      "visible_noncause": 198,
+      "invisible": 95
+    },
+    "rates": {
+      "gold_cause": 0.20380434782608695,
+      "visible_noncause": 0.5380434782608695,
+      "invisible": 0.25815217391304346
+    },
+    "vs_random_baseline": {
+      "observed_invisible_rate": 0.25815217391304346,
+      "baseline_invisible_rate": 0.31750954934511594,
+      "diff": -0.059357375432072465,
+      "diff_ci_lo": -0.10140249533252234,
+      "diff_ci_hi": -0.015907877345910388,
+      "n_resamples": 10000,
+      "seed": 42,
+      "n_targets": 92
+    },
+    "interpretation": "BELOW random baseline (diff CI excludes 0) -- incomplete-judgment bias appears small"
+  }
+}
