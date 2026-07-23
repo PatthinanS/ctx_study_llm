@@ -1,0 +1,42 @@
+{
+  "experiment_name": "c1_llama31",
+  "config": {
+    "experiment_name": "c1_llama31",
+    "model": "llama3.1:8b",
+    "csv_path": "data/iemocap/iemocap_merged_all.csv",
+    "splits": {
+      "test_session": "Session5",
+      "val_session": "Session4",
+      "train_sessions": [
+        "Session1",
+        "Session2",
+        "Session3"
+      ]
+    },
+    "condition": "C1",
+    "context": {
+      "strategy": "window",
+      "k": 4,
+      "strategy_kwargs": {}
+    },
+    "labels": [
+      "ang",
+      "hap",
+      "exc",
+      "neu",
+      "sad",
+      "fru"
+    ],
+    "output_dir": "outputs",
+    "temperature": 0,
+    "seed": 42,
+    "max_eval": null,
+    "concurrency": 4,
+    "eval_split": "test"
+  },
+  "system_prompt": "You are an expert annotator for emotion recognition in conversation (IEMOCAP).\n\nTASK: Given a single TARGET utterance from a dyadic conversation (optionally with preceding context), predict:\n1. A categorical emotion label for the TARGET utterance only.\n2. Continuous Valence/Arousal/Dominance (VAD) ratings for the TARGET utterance only.\n\nCATEGORICAL LABELS (choose exactly one):\n- ang: angry\n- hap: happy\n- exc: excited\n- neu: neutral\n- sad: sad\n- fru: frustrated\n\nVAD DIMENSIONS (each on a continuous 1.0-5.0 scale, one decimal place allowed):\n- v (valence): 1.0 = very negative, 5.0 = very positive\n- a (arousal): 1.0 = very calm, 5.0 = very activated\n- d (dominance): 1.0 = very submissive, 5.0 = very dominant\n\nOUTPUT FORMAT: Respond with JSON only, matching the required schema exactly. No prose, no explanation, no markdown fences.",
+  "model": "llama3.1:8b",
+  "ollama_version": "ollama version is 0.22.0",
+  "timestamp": "2026-07-23T01:57:30.781838+00:00",
+  "git_commit": "9e219c01bd0364116a4277fb92534db7001c1da1"
+}
