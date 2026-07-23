@@ -26,12 +26,15 @@ from src.data import (
     is_categorical_usable,
     iter_eval_rows,
     load_iemocap,
+    select_few_shot_examples,
 )
 from src.prompts import (
     RESPONSE_SCHEMA,
     SELECTION_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
+    build_few_shot_block,
     build_selection_schema,
+    build_system_prompt,
     build_user_prompt_c0,
     build_user_prompt_c1,
     build_user_prompt_selection,
@@ -65,6 +68,12 @@ def load_config(path: str) -> dict:
     cfg.setdefault("vllm_base_url", "http://127.0.0.1:8000")
     if cfg["backend"] not in ("ollama", "vllm"):
         raise ValueError(f"Unknown backend '{cfg['backend']}'. Must be 'ollama' or 'vllm'.")
+    cfg.setdefault("few_shot", None)  # {"n": <int>}; existing configs lack this -> unchanged
+    if cfg["few_shot"] is not None:
+        if not isinstance(cfg["few_shot"], dict) or "n" not in cfg["few_shot"]:
+            raise ValueError('few_shot config must be a dict with an "n" field, e.g. {"n": 4}')
+        if not isinstance(cfg["few_shot"]["n"], int) or cfg["few_shot"]["n"] < 1:
+            raise ValueError("few_shot.n must be a positive integer")
     return cfg
 
 
@@ -293,7 +302,14 @@ def call_llm_with_retry(
     return call_ollama_with_retry(model, system, user, options, schema)
 
 
-def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: dict) -> dict:
+def process_one(
+    row: dict,
+    history: list[dict],
+    cfg: dict,
+    render_fn,
+    options: dict,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> dict:
     """Run one utterance through Ollama and build its preds.jsonl record.
 
     Pure compute, no file I/O -- safe to call concurrently from a thread pool.
@@ -307,7 +323,7 @@ def process_one(row: dict, history: list[dict], cfg: dict, render_fn, options: d
     }
 
     pred_label, pred_vad, latency_ms, raw = call_llm_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
+        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -339,7 +355,14 @@ def _extract_gold_fields(row: dict) -> tuple[str | None, dict]:
 
 
 def process_one_c2ab(
-    row: dict, history: list[dict], cfg: dict, strategy: str, k: int, kwargs: dict, options: dict
+    row: dict,
+    history: list[dict],
+    cfg: dict,
+    strategy: str,
+    k: int,
+    kwargs: dict,
+    options: dict,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> dict:
     """C2a ("random") / C2b ("sim") single-call path.
 
@@ -355,7 +378,7 @@ def process_one_c2ab(
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
     pred_label, pred_vad, latency_ms, raw = call_llm_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
+        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -438,9 +461,22 @@ def select_stage1(row: dict, history: list[dict], cfg: dict, k: int, kwargs: dic
     }
 
 
-def process_one_c2c(row: dict, history: list[dict], cfg: dict, k: int, kwargs: dict, options: dict) -> dict:
+def process_one_c2c(
+    row: dict,
+    history: list[dict],
+    cfg: dict,
+    k: int,
+    kwargs: dict,
+    options: dict,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> dict:
     """C2c ("llm_select") two-stage path: LLM-judged selection, then the
-    existing dual-output prediction call with the selected turns as context."""
+    existing dual-output prediction call with the selected turns as context.
+
+    system_prompt only affects the stage-2 prediction call -- stage 1
+    (select_stage1) always uses SELECTION_SYSTEM_PROMPT, since it doesn't
+    output VAD and few-shot VAD calibration is irrelevant to it.
+    """
     pool_size = len(history)
     stage1 = select_stage1(row, history, cfg, k, kwargs, options)
     selected_indices = sorted(stage1["selected_indices"])
@@ -449,7 +485,7 @@ def process_one_c2c(row: dict, history: list[dict], cfg: dict, k: int, kwargs: d
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
     pred_label, pred_vad, stage2_latency_ms, raw = call_llm_with_retry(
-        cfg["model"], SYSTEM_PROMPT, user_prompt, options, RESPONSE_SCHEMA, cfg
+        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA, cfg
     )
 
     return {
@@ -472,7 +508,7 @@ def process_one_c2c(row: dict, history: list[dict], cfg: dict, k: int, kwargs: d
     }
 
 
-def resolve_c2_process_fn(cfg: dict, options: dict):
+def resolve_c2_process_fn(cfg: dict, options: dict, system_prompt: str = SYSTEM_PROMPT):
     """Build a (row, history) -> record closure for condition=="C2",
     dispatching on context.strategy."""
     strategy = cfg["context"]["strategy"]
@@ -481,11 +517,15 @@ def resolve_c2_process_fn(cfg: dict, options: dict):
 
     if strategy == "random":
         kwargs.setdefault("seed", cfg["seed"])
-        return lambda row, history: process_one_c2ab(row, history, cfg, strategy, k, kwargs, options)
+        return lambda row, history: process_one_c2ab(
+            row, history, cfg, strategy, k, kwargs, options, system_prompt
+        )
     if strategy == "sim":
-        return lambda row, history: process_one_c2ab(row, history, cfg, strategy, k, kwargs, options)
+        return lambda row, history: process_one_c2ab(
+            row, history, cfg, strategy, k, kwargs, options, system_prompt
+        )
     if strategy == "llm_select":
-        return lambda row, history: process_one_c2c(row, history, cfg, k, kwargs, options)
+        return lambda row, history: process_one_c2c(row, history, cfg, k, kwargs, options, system_prompt)
     raise ValueError(f"Unknown C2 context.strategy '{strategy}'")
 
 
@@ -517,7 +557,7 @@ def _get_vllm_info(cfg: dict) -> dict:
         return {"vllm_base_url": base_url}
 
 
-def write_run_meta(output_dir: Path, cfg: dict) -> None:
+def write_run_meta(output_dir: Path, cfg: dict, system_prompt: str = SYSTEM_PROMPT) -> None:
     backend = cfg.get("backend", "ollama")
     backend_info = _get_vllm_info(cfg) if backend == "vllm" else None
 
@@ -536,7 +576,7 @@ def write_run_meta(output_dir: Path, cfg: dict) -> None:
     meta = {
         "experiment_name": cfg["experiment_name"],
         "config": cfg,
-        "system_prompt": SYSTEM_PROMPT,
+        "system_prompt": system_prompt,
         "model": cfg["model"],
         "ollama_version": _get_ollama_version(),
         "backend": backend,
@@ -618,10 +658,12 @@ def ensure_backend_reachable(cfg: dict) -> None:
         ensure_ollama_reachable(cfg["model"])
 
 
-def dry_run_preview(rows: list[tuple[dict, list[dict]]], render_fn, cfg: dict) -> None:
+def dry_run_preview(
+    rows: list[tuple[dict, list[dict]]], render_fn, cfg: dict, system_prompt: str = SYSTEM_PROMPT
+) -> None:
     print("=" * 80)
     print("SYSTEM PROMPT:")
-    print(SYSTEM_PROMPT)
+    print(system_prompt)
     print("=" * 80)
     print("RESPONSE SCHEMA:")
     print(json.dumps(RESPONSE_SCHEMA, indent=2))
@@ -663,14 +705,16 @@ def _pick_dry_run_samples_c2(rows: list[tuple[dict, list[dict]]], k: int):
     return samples[:3]
 
 
-def dry_run_preview_c2(rows: list[tuple[dict, list[dict]]], cfg: dict) -> None:
+def dry_run_preview_c2(
+    rows: list[tuple[dict, list[dict]]], cfg: dict, system_prompt: str = SYSTEM_PROMPT
+) -> None:
     strategy = cfg["context"]["strategy"]
     k = cfg["context"].get("k", 4)
     kwargs = dict(cfg["context"].get("strategy_kwargs", {}))
 
     print("=" * 80)
     print("SYSTEM PROMPT (stage 2 / prediction):")
-    print(SYSTEM_PROMPT)
+    print(system_prompt)
     print("=" * 80)
     if strategy == "llm_select":
         print("SELECTION SYSTEM PROMPT (stage 1):")
@@ -724,7 +768,7 @@ def main() -> None:
         cfg = apply_smoke(cfg)
 
     df = load_iemocap(cfg["csv_path"])
-    _train, val_session, test_session = get_splits(cfg)
+    train_sessions, val_session, test_session = get_splits(cfg)
     session = val_session if cfg["eval_split"] == "val" else test_session
 
     rows = list(iter_eval_rows(df, session))
@@ -733,12 +777,19 @@ def main() -> None:
 
     condition = cfg["condition"]
 
+    few_shot_cfg = cfg.get("few_shot")
+    few_shot_block = None
+    if few_shot_cfg:
+        examples = select_few_shot_examples(df, train_sessions, few_shot_cfg["n"], cfg["seed"])
+        few_shot_block = build_few_shot_block(examples)
+    system_prompt = build_system_prompt(few_shot_block)
+
     if args.dry_run:
         if condition in ("C0", "C1"):
             render_fn = resolve_render_fn(cfg)
-            dry_run_preview(rows, render_fn, cfg)
+            dry_run_preview(rows, render_fn, cfg, system_prompt)
         elif condition == "C2":
-            dry_run_preview_c2(rows, cfg)
+            dry_run_preview_c2(rows, cfg, system_prompt)
         else:
             raise ValueError(f"Unknown condition '{condition}'")
         return
@@ -760,7 +811,7 @@ def main() -> None:
             preds_path.unlink()
             print(f"[run] removed {preds_path}, starting fresh")
 
-    write_run_meta(output_dir, cfg)
+    write_run_meta(output_dir, cfg, system_prompt)
 
     done_ids = load_done_ids(preds_path)
     remaining = [(row, hist) for row, hist in rows if row["utterance_id"] not in done_ids]
@@ -776,9 +827,9 @@ def main() -> None:
 
     if condition in ("C0", "C1"):
         render_fn = resolve_render_fn(cfg)
-        submit_fn = lambda row, history: process_one(row, history, cfg, render_fn, options)
+        submit_fn = lambda row, history: process_one(row, history, cfg, render_fn, options, system_prompt)
     elif condition == "C2":
-        submit_fn = resolve_c2_process_fn(cfg, options)
+        submit_fn = resolve_c2_process_fn(cfg, options, system_prompt)
     else:
         raise ValueError(f"Unknown condition '{condition}'")
 

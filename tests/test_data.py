@@ -11,6 +11,7 @@ from src.data import (
     build_context,
     is_categorical_usable,
     load_iemocap,
+    select_few_shot_examples,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -237,3 +238,80 @@ def test_strategy_sim_caches_embeddings_across_calls(synthetic_dialogue, monkeyp
 
     total_texts_embedded = sum(len(c) for c in calls)
     assert total_texts_embedded == 3  # turn0, turn1, turn2 -- each embedded once
+
+
+# ---------------------------------------------------------------------------
+# select_few_shot_examples
+# ---------------------------------------------------------------------------
+
+
+def _few_shot_df():
+    """12 eligible train-session rows (dominance spread 1.0..5.0) plus one
+    val-session row with an extreme low dominance that must never be picked."""
+    rows = []
+    dominances = [1.0, 1.4, 1.8, 2.2, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 5.0, 2.0]
+    sessions = ["Session1"] * 4 + ["Session2"] * 4 + ["Session3"] * 4
+    for i, (dom, sess) in enumerate(zip(dominances, sessions)):
+        rows.append(
+            {
+                "session": sess,
+                "dialog": "d1",
+                "utterance_id": f"train_{i}",
+                "speaker": "A",
+                "start_time": float(i),
+                "end_time": float(i) + 0.5,
+                "text": f"train text {i}",
+                "emotion": "neu",
+                "valence": 3.0,
+                "arousal": 3.0,
+                "dominance": dom,
+            }
+        )
+    rows.append(
+        {
+            "session": "Session4",
+            "dialog": "d1",
+            "utterance_id": "val_extreme",
+            "speaker": "A",
+            "start_time": 99.0,
+            "end_time": 99.5,
+            "text": "val text",
+            "emotion": "neu",
+            "valence": 3.0,
+            "arousal": 3.0,
+            "dominance": 0.1,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
+def test_select_few_shot_examples_deterministic():
+    df = _few_shot_df()
+    train_sessions = ["Session1", "Session2", "Session3"]
+    ex1 = select_few_shot_examples(df, train_sessions, n=4, seed=42)
+    ex2 = select_few_shot_examples(df, train_sessions, n=4, seed=42)
+    assert ex1 == ex2
+
+
+def test_select_few_shot_examples_only_from_train_sessions():
+    df = _few_shot_df()
+    train_sessions = ["Session1", "Session2", "Session3"]
+    examples = select_few_shot_examples(df, train_sessions, n=4, seed=42)
+    texts = {e["text"] for e in examples}
+    assert "val text" not in texts
+    assert all(t.startswith("train text") for t in texts)
+
+
+def test_select_few_shot_examples_spread_across_dominance():
+    df = _few_shot_df()
+    train_sessions = ["Session1", "Session2", "Session3"]
+    examples = select_few_shot_examples(df, train_sessions, n=4, seed=42)
+    dominances = [e["vad"]["d"] for e in examples]
+    assert dominances == sorted(dominances)
+    assert max(dominances) - min(dominances) > 2.0
+
+
+def test_select_few_shot_examples_raises_when_pool_too_small():
+    df = _few_shot_df()
+    with pytest.raises(ValueError):
+        select_few_shot_examples(df, ["Session1"], n=10, seed=42)

@@ -249,6 +249,51 @@ def _strategy_sim(utterance: dict, history: list[dict], k: int, **kwargs) -> lis
     return [history[i] for i in top_indices]
 
 
+def select_few_shot_examples(
+    df: pd.DataFrame, train_sessions: list[str], n: int, seed: int
+) -> list[dict]:
+    """Pick n fixed demonstration rows from train_sessions only.
+
+    Spread across the dominance range (sort the eligible pool by dominance,
+    split into n equal-sized buckets, pick one row per bucket) rather than a
+    plain random sample -- the point is to show the model the scale,
+    especially the dominance axis that zero-shot prompting struggles with.
+    Picking within a bucket is deterministic via _stable_seed, reusing the
+    same hashlib-based seeding convention as _strategy_random.
+
+    Only rows with a usable categorical label and a full non-NaN VAD triple
+    are eligible (a demonstration must show the complete required output).
+    """
+    pool = df[df["session"].isin(train_sessions)]
+    pool = pool[pool.apply(is_categorical_usable, axis=1)]
+    pool = pool.dropna(subset=["valence", "arousal", "dominance"])
+    if len(pool) < n:
+        raise ValueError(
+            f"Not enough eligible train-session rows ({len(pool)}) for {n} few-shot examples"
+        )
+    pool = pool.sort_values("dominance").reset_index(drop=True)
+    bucket_edges = np.linspace(0, len(pool), n + 1).astype(int)
+
+    examples = []
+    for i in range(n):
+        lo, hi = bucket_edges[i], bucket_edges[i + 1]
+        bucket = pool.iloc[lo:hi] if hi > lo else pool
+        rng = random.Random(_stable_seed(seed, f"few_shot:{i}"))
+        row = bucket.iloc[rng.randrange(len(bucket))]
+        examples.append(
+            {
+                "text": row["text"],
+                "label": row["emotion"],
+                "vad": {
+                    "v": round(float(row["valence"]), 1),
+                    "a": round(float(row["arousal"]), 1),
+                    "d": round(float(row["dominance"]), 1),
+                },
+            }
+        )
+    return examples
+
+
 STRATEGY_REGISTRY: dict[str, Callable[..., list[dict]]] = {
     "none": _strategy_none,
     "window": _strategy_window,

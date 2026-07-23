@@ -52,6 +52,10 @@ The fix was downgrading to `0.22.0` (confirmed working via a real `ollama run` c
 
 Don't collapse `condition` and `context.strategy` back into one field — that's what keeps both extensions restructuring-free.
 
+## Few-shot VAD prompting (demo, orthogonal to `condition`/`context.strategy`)
+
+`few_shot` is a third independent config axis, same shape as `backend`: an optional top-level `{"n": <int>}` field, `cfg.setdefault("few_shot", None)`-gated in `load_config`, so any config without it is byte-for-byte unaffected. `src/prompts.py::build_system_prompt(few_shot_block)` returns the `SYSTEM_PROMPT` constant unchanged (same object, not just equal) when there's no block — that identity is what guarantees the zero-shot path stays untouched. The resolved `system_prompt` string is threaded as a new trailing default-valued parameter (`system_prompt: str = SYSTEM_PROMPT`) through `process_one`, `process_one_c2ab`, `process_one_c2c` (stage-2 only — stage-1 turn selection keeps `SELECTION_SYSTEM_PROMPT` unmodified, since it doesn't output VAD), `resolve_c2_process_fn`, `dry_run_preview(_c2)`, and `write_run_meta` — mirrors how `options` is already threaded everywhere, so existing callers/tests that don't pass it keep working unchanged. `src/data.py::select_few_shot_examples` draws examples only from `splits.train_sessions` (read from config, never hardcoded), bucketed by dominance and picked deterministically via the existing `_stable_seed` helper (same seeding convention `_strategy_random` uses) — spread across the range rather than a plain random sample, since dominance is the dimension this demo is meant to test. `src/score.py` needed no changes: `few_shot` shows up in `run_meta.json` automatically via its verbatim `cfg` dump, and no new `preds.jsonl` field was introduced.
+
 ## Backend: Ollama (default) vs. vLLM (selectable, `vllm-backend` branch)
 
 `condition`/`context.strategy` select *what* gets run; the orthogonal `backend` config field (`"ollama"` default, or `"vllm"`) selects *which server* runs it. This exists because the remote box's NVIDIA driver (535.154.05, CUDA 12.2 ceiling) can't run conda-forge's `ollama` CUDA builds (only ship `cuda_129`/`cuda_130`), so a 36-hour CPU-only C2 run motivated pulling `meta-llama/Llama-3.1-8B-Instruct` straight from Hugging Face and serving it via vLLM instead, on the box's 2x idle Quadro RTX 5000 (16GB each).
@@ -100,6 +104,21 @@ python -m src.score --run outputs/c2_sim_llama31_val
 python -m src.score --run outputs/c2_llm_llama31_val
 python -m src.score --run outputs/c2_llm_llama31_val --compare-selections outputs/c2_sim_llama31_val
 python -m src.score --run outputs/c2_sim_llama31_val --compare-selections
+
+# Few-shot (demo): zero-shot vs. few-shot pairs, C0/C1/C2-llm_select, val only, 20-sample smoke
+python -m src.run --config configs/c0_fewshot_llama31_val_demo.json --dry-run
+python -m src.run --config configs/c0_llama31_val_demo.json --smoke
+python -m src.run --config configs/c0_fewshot_llama31_val_demo.json --smoke
+python -m src.run --config configs/c1_llama31_val_demo.json --smoke
+python -m src.run --config configs/c1_fewshot_llama31_val_demo.json --smoke
+python -m src.run --config configs/c2_llm_llama31_val_demo.json --smoke
+python -m src.run --config configs/c2_llm_fewshot_llama31_val_demo.json --smoke
+python -m src.score --run outputs/c0_llama31_val_demo
+python -m src.score --run outputs/c0_fewshot_llama31_val_demo
+python -m src.score --run outputs/c1_llama31_val_demo
+python -m src.score --run outputs/c1_fewshot_llama31_val_demo
+python -m src.score --run outputs/c2_llm_llama31_val_demo
+python -m src.score --run outputs/c2_llm_fewshot_llama31_val_demo
 
 # vLLM backend (vllm-backend branch): server runs in its own env, separately
 conda activate venv-vllm
