@@ -100,6 +100,35 @@ python -m src.score --run outputs/c2_sim_llama31_val --compare-selections
 
 The `_val` configs run against the val session (Session4) via a top-level `"eval_split": "val"` config field (default `"test"` if omitted, matching C0/C1's existing behavior); `_test` twins of all three configs run against Session5.
 
+### Few-shot (demo)
+
+An optional top-level `"few_shot": {"n": 4}` config field appends a fixed block of `n` text→(label, VAD) demonstrations to the system prompt, in the exact `RESPONSE_SCHEMA` output shape (`{"label": ..., "vad": {"v": ..., "a": ..., "d": ...}}`), so the model sees the required format and the 1.0-5.0 scale together before annotating. Examples are drawn only from `splits.train_sessions` (never val/test), spread across the dominance range (one per dominance-sorted bucket, picked deterministically from `seed`) rather than sampled at random. Configs without a `few_shot` field are unaffected — this is purely additive.
+
+```bash
+# Dry run: the EXAMPLES block appears in the printed system prompt for the
+# fewshot configs and is absent for the zero-shot ones.
+python -m src.run --config configs/c0_fewshot_llama31_val_demo.json --dry-run
+python -m src.run --config configs/c1_fewshot_llama31_val_demo.json --dry-run
+python -m src.run --config configs/c2_llm_fewshot_llama31_val_demo.json --dry-run
+
+# Smoke (20 utterances), zero-shot vs. few-shot pairs, all on val (Session4).
+python -m src.run --config configs/c0_llama31_val_demo.json --smoke
+python -m src.run --config configs/c0_fewshot_llama31_val_demo.json --smoke
+python -m src.run --config configs/c1_llama31_val_demo.json --smoke
+python -m src.run --config configs/c1_fewshot_llama31_val_demo.json --smoke
+python -m src.run --config configs/c2_llm_llama31_val_demo.json --smoke
+python -m src.run --config configs/c2_llm_fewshot_llama31_val_demo.json --smoke
+
+python -m src.score --run outputs/c0_llama31_val_demo
+python -m src.score --run outputs/c0_fewshot_llama31_val_demo
+python -m src.score --run outputs/c1_llama31_val_demo
+python -m src.score --run outputs/c1_fewshot_llama31_val_demo
+python -m src.score --run outputs/c2_llm_llama31_val_demo
+python -m src.score --run outputs/c2_llm_fewshot_llama31_val_demo
+```
+
+Each zero-shot/few-shot pair shares every config field except `few_shot`, so `--smoke`'s deterministic first-20-rows slice means both runs in a pair score the identical 20 utterances — a clean paired comparison. 20 samples is far too few for a reliable Pearson r; treat this as a "did anything move at all" smoke test, not a result.
+
 ## Output layout
 
 ```

@@ -8,6 +8,8 @@ unchanged -- only src/data.py's STRATEGY_REGISTRY needs a new entry.
 """
 from __future__ import annotations
 
+import json
+
 from src.data import LABELS
 
 SYSTEM_PROMPT = """You are an expert annotator for emotion recognition in conversation (IEMOCAP).
@@ -68,6 +70,34 @@ RESPONSE_SCHEMA = {
     },
     "required": ["label", "vad"],
 }
+
+
+def build_few_shot_block(examples: list[dict]) -> str:
+    """Render fixed text -> {label, vad} demonstrations, matching
+    RESPONSE_SCHEMA's exact output shape, so the model sees the required
+    format and the 1.0-5.0 VAD scale together.
+
+    examples: list of {"text": str, "label": str, "vad": {"v","a","d": float}}.
+    """
+    blocks = []
+    for i, ex in enumerate(examples, 1):
+        output = json.dumps({"label": ex["label"], "vad": ex["vad"]})
+        blocks.append(f'Example {i}:\nUtterance: "{ex["text"]}"\nOutput: {output}')
+    return (
+        "EXAMPLES (showing the required output format and the 1.0-5.0 VAD scale; "
+        "illustrative only, unrelated to the conversation below):\n\n" + "\n\n".join(blocks)
+    )
+
+
+def build_system_prompt(few_shot_block: str | None = None) -> str:
+    """SYSTEM_PROMPT, optionally with a few-shot examples block appended.
+
+    Returns SYSTEM_PROMPT unchanged (same object) when few_shot_block is
+    falsy, so the zero-shot path stays byte-for-byte identical.
+    """
+    if not few_shot_block:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}\n\n{few_shot_block}"
 
 
 SELECTION_SYSTEM_PROMPT = """You are selecting which prior conversation turns to give to a downstream emotion-recognition annotator as context for a single TARGET utterance.

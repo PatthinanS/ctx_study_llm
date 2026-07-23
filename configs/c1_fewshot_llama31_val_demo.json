@@ -1,0 +1,26 @@
+{
+  "experiment_name": "c1_fewshot_llama31_val_demo",
+  "model": "llama3.1:8b",
+  "csv_path": "data/iemocap/iemocap_merged_all.csv",
+  "splits": {
+    "test_session": "Session5",
+    "val_session": "Session4",
+    "train_sessions": ["Session1", "Session2", "Session3"]
+  },
+  "condition": "C1",
+  "context": {
+    "strategy": "window",
+    "k": 4,
+    "strategy_kwargs": {}
+  },
+  "few_shot": {
+    "n": 4
+  },
+  "labels": ["ang", "hap", "exc", "neu", "sad", "fru"],
+  "output_dir": "outputs",
+  "temperature": 0,
+  "seed": 42,
+  "max_eval": null,
+  "concurrency": 4,
+  "eval_split": "val"
+}
