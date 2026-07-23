@@ -65,6 +65,24 @@ DIALOG_RE = re.compile(r"(Ses\d\d[FM]_[a-z]+\d+[ab]?(?:_\d+)?)")
 DEFAULT_RECCON = "data/reccon/iemocap_test.json"
 DEFAULT_CSV = "data/iemocap/iemocap_merged_all.csv"
 
+# RECCON-IE spells emotion labels out in full ("excited", "neutral", ...); the
+# ctx_study CSV uses IEMOCAP's 3-letter codes (src.data.LABELS: "exc", "neu",
+# ...). Only "sad" happens to be spelled identically in both, which is why an
+# unmapped comparison silently looks like near-total disagreement instead of
+# the true ~98% agreement -- this map exists purely for that comparison; the
+# raw `emotion_reccon` field in the output JSON is left as RECCON wrote it.
+EMOTION_LABEL_MAP = {
+    "excited": "exc", "neutral": "neu", "frustrated": "fru",
+    "angry": "ang", "happy": "hap", "sad": "sad",
+    "surprised": "sur", "fearful": "fea", "disgusted": "dis", "other": "oth",
+}
+
+
+def _map_reccon_emotion(label: str | None) -> str | None:
+    if label is None:
+        return None
+    return EMOTION_LABEL_MAP.get(label, label)
+
 RECENCY_KS = [1, 2, 3, 4, 5, 8, 10, 15]
 
 
@@ -261,7 +279,7 @@ def build_alignment(
                 tot_ann += 1
             tot_cause_links += len(u["cause_csv_pos"])
             tot_unresolved += u["cause_unresolved"]
-            if u["emotion_reccon"] == u["emotion_csv"]:
+            if _map_reccon_emotion(u["emotion_reccon"]) == u["emotion_csv"]:
                 label_agree += 1
             else:
                 label_disagree += 1

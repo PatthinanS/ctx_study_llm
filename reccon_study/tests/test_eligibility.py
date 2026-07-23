@@ -40,13 +40,22 @@ def test_bucket_no_in_pool_cause_self_referential():
     assert classify_eligibility(t, in_preds=True, pool_size=10, k=4) == "no_in_pool_cause"
 
 
-def test_bucket_no_in_pool_cause_latent_only():
+def test_bucket_no_cause_latent_only_no_resolved_position():
+    # a latent ("b") marker with no resolved cause_csv_pos gives us nothing
+    # to check against being in-pool -- indistinguishable from no annotation.
     t = _target(cause_csv_pos=[], has_latent_marker=True)
-    assert target_cause_bucket(t) == "no_in_pool_cause"
+    assert target_cause_bucket(t) == "no_cause"
 
 
-def test_bucket_no_in_pool_cause_unresolved_only():
+def test_bucket_no_cause_unresolved_only_no_resolved_position():
     t = _target(cause_csv_pos=[], cause_unresolved=1)
+    assert target_cause_bucket(t) == "no_cause"
+
+
+def test_bucket_no_in_pool_cause_requires_a_resolved_position():
+    # a resolved-but-unreachable position (self-referential) IS no_in_pool_cause,
+    # unlike the unresolved/latent-only cases above.
+    t = _target(csv_pos=10, cause_csv_pos=[10])
     assert target_cause_bucket(t) == "no_in_pool_cause"
 
 

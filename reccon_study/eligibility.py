@@ -6,11 +6,14 @@ buckets before any selection-quality metric touches it. Two of the five
 (`no_in_pool_cause`, `forced_selection`) don't exist in a naive scoring setup
 and silently inflate every downstream metric if left implicit:
 
-- a target whose only gold causes are self-referential (the cause turn IS the
-  target) or unresolved/latent-only can never have its recall reach 1 no
-  matter how good the selector is, since the pool is strictly prior turns --
-  scoring it anyway just adds noise pulling every selector's recall down by
-  the same fixed, uninformative amount.
+- a target whose only *resolved* gold cause positions are self-referential
+  (the cause turn IS the target) can never have its recall reach 1 no matter
+  how good the selector is, since the pool is strictly prior turns -- scoring
+  it anyway just adds noise pulling every selector's recall down by the same
+  fixed, uninformative amount. (A target with only unresolved-reference or
+  latent-only ("b") cause evidence and no resolved position at all gives us
+  nothing to check against being in-pool -- it lands in `no_cause` instead,
+  indistinguishable from having no annotation.)
 - a target whose pool is so small that every strategy selects the entire pool
   (`pool_size <= k`) has trivially perfect recall for ANY selector, including
   random -- scoring it makes every selector look identically good and dilutes
@@ -25,13 +28,14 @@ BUCKETS = ["not_in_preds", "no_cause", "no_in_pool_cause", "forced_selection", "
 
 
 def has_annotation(target_align: dict) -> bool:
-    """True iff RECCON recorded ANY cause evidence for this target at all
-    (resolved, unresolved, or latent-only)."""
-    return (
-        bool(target_align["cause_csv_pos"])
-        or target_align["cause_unresolved"] > 0
-        or target_align["has_latent_marker"]
-    )
+    """True iff RECCON resolved at least one cause POSITION for this target
+    (cause_csv_pos non-empty). An unresolved integer reference or a latent-
+    only ("b") marker with no resolved position gives us nothing to check
+    against being in-pool or not -- it's indistinguishable from no
+    annotation at all for scoring purposes, so it lands in "no_cause", not
+    the separate "no_in_pool_cause" bucket (which is reserved for a target
+    with a resolved-but-structurally-unreachable cause)."""
+    return bool(target_align["cause_csv_pos"])
 
 
 def in_pool_cause_positions(target_align: dict) -> list[int]:

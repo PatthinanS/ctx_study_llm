@@ -67,10 +67,13 @@ metric actually used here.
 - **Eligibility is centralized** in `eligibility.py`, consumed by both
   `leakage.py` and `selection_eval.py`. Every RECCON-aligned target is
   classified into exactly one of five buckets before any metric touches it:
-  `not_in_preds` (no record for it in this run), `no_cause` (RECCON recorded
-  no cause annotation at all), `no_in_pool_cause` (annotated, but every cause
-  is self-referential or unresolved/latent-only — unreachable, since the pool
-  is strictly prior turns), `forced_selection` (`pool_size <= k`, so every
+  `not_in_preds` (no record for it in this run), `no_cause` (RECCON resolved
+  no usable cause position at all — including a target whose only cause
+  evidence is an unresolved reference or a latent-only ("b") marker, since
+  neither gives a position to check against being in-pool), `no_in_pool_cause`
+  (RECCON resolved a cause position, but every one is self-referential —
+  unreachable, since the pool is strictly prior turns), `forced_selection`
+  (`pool_size <= k`, so every
   strategy including random selects the entire pool — recall is trivially
   perfect and uninformative), and `scoreable` (none of the above). Only
   `scoreable` targets are scored. The `not_in_preds`/`no_cause`/

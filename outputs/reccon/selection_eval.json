@@ -14,8 +14,8 @@
     "k": 4,
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -227,8 +227,8 @@
     "k": 4,
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -440,8 +440,8 @@
     "k": 4,
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -653,8 +653,8 @@
     "k": 4,
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662

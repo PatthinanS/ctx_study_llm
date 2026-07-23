@@ -13,8 +13,8 @@
   "c1_llama31": {
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -45,8 +45,8 @@
   "c2_random_llama31_test": {
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -77,8 +77,8 @@
   "c2_sim_llama31_test": {
     "funnel": {
       "not_in_preds": 538,
-      "no_cause": 19,
-      "no_in_pool_cause": 12,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
       "forced_selection": 1,
       "scoreable": 92,
       "aligned": 662
@@ -100,6 +100,38 @@
       "diff": -0.059357375432072465,
       "diff_ci_lo": -0.10140249533252234,
       "diff_ci_hi": -0.015907877345910388,
+      "n_resamples": 10000,
+      "seed": 42,
+      "n_targets": 92
+    },
+    "interpretation": "BELOW random baseline (diff CI excludes 0) -- incomplete-judgment bias appears small"
+  },
+  "c2_llm_llama31_test": {
+    "funnel": {
+      "not_in_preds": 538,
+      "no_cause": 23,
+      "no_in_pool_cause": 8,
+      "forced_selection": 1,
+      "scoreable": 92,
+      "aligned": 662
+    },
+    "n_selections": 368,
+    "counts": {
+      "gold_cause": 85,
+      "visible_noncause": 198,
+      "invisible": 85
+    },
+    "rates": {
+      "gold_cause": 0.23097826086956522,
+      "visible_noncause": 0.5380434782608695,
+      "invisible": 0.23097826086956522
+    },
+    "vs_random_baseline": {
+      "observed_invisible_rate": 0.23097826086956522,
+      "baseline_invisible_rate": 0.31750954934511594,
+      "diff": -0.08653128847555071,
+      "diff_ci_lo": -0.13458295515395938,
+      "diff_ci_hi": -0.03652943274353982,
       "n_resamples": 10000,
       "seed": 42,
       "n_targets": 92
