@@ -1,0 +1,124 @@
+{
+  "run_meta_summary": {
+    "experiment_name": "c2_llm_fewshot_llama31_val_demo",
+    "model": "llama3.1:8b",
+    "condition": "C2"
+  },
+  "categorical": {
+    "n_scored": 19,
+    "n_excluded": 1,
+    "n_invalid": 0,
+    "accuracy": 0.6842105263157895,
+    "macro_f1": 0.20000000000000004,
+    "per_class_f1": {
+      "ang": 0.4,
+      "hap": 0.0,
+      "exc": 0.0,
+      "neu": 0.0,
+      "sad": 0.0,
+      "fru": 0.8000000000000002
+    },
+    "confusion_matrix": {
+      "labels": [
+        "ang",
+        "hap",
+        "exc",
+        "neu",
+        "sad",
+        "fru"
+      ],
+      "matrix": [
+        [
+          1,
+          0,
+          0,
+          0,
+          0,
+          3
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          3,
+          0,
+          0,
+          0,
+          12
+        ]
+      ]
+    }
+  },
+  "dimensional": {
+    "n_total_rows": 20,
+    "n_nan_gold_dropped": 0,
+    "n_pred_invalid_dropped": 0,
+    "n_scored": 20,
+    "pearson": {
+      "v": 0.11769856679327827,
+      "a": -0.14526523310082212,
+      "d": -0.37261658776876344,
+      "mean": -0.13339441802543575
+    },
+    "rmse": {
+      "v": 0.6870225614927067,
+      "a": 0.7896201618499872,
+      "d": 1.2485992151206888,
+      "mean": 0.9084139794877942
+    },
+    "mae": {
+      "v": 0.48999999999999994,
+      "a": 0.6450000000000001,
+      "d": 0.97,
+      "mean": 0.7016666666666667
+    },
+    "granularity": {
+      "v": 5,
+      "a": 4,
+      "d": 9
+    }
+  },
+  "cost": {
+    "n_records": 20,
+    "stage1_latency_ms": {
+      "mean": 42091.31617308594,
+      "total": 841826.3234617189
+    },
+    "stage2_latency_ms": {
+      "mean": 92789.53502215445,
+      "total": 1855790.700443089
+    },
+    "fallback_rate": 0.0,
+    "stage1_skipped_rate": 0.25
+  }
+}
