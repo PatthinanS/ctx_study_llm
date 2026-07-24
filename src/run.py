@@ -1,9 +1,12 @@
 """Inference entrypoint: python -m src.run --config configs/<name>.json.
 
-One Ollama chat call per utterance, dual output (categorical label + VAD),
-constrained by a JSON schema. Incremental, resumable JSONL output; never
-crashes the run on a single bad response (one retry, then record and
-continue).
+One Ollama chat call per utterance, constrained by a JSON schema. Output is
+dual (categorical label + VAD) by default (cfg["task"] == "both"); --task
+vad/cat (or a config's own "task" field) narrows a run to a VAD-only or
+categorical-only call with its own system prompt/schema -- see
+RESPONSE_SCHEMA_BY_TASK and src/prompts.py's build_system_prompt. Incremental,
+resumable JSONL output; never crashes the run on a single bad response (one
+retry, then record and continue).
 """
 from __future__ import annotations
 
@@ -30,6 +33,8 @@ from src.data import (
 )
 from src.prompts import (
     RESPONSE_SCHEMA,
+    RESPONSE_SCHEMA_CAT,
+    RESPONSE_SCHEMA_VAD,
     SELECTION_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     build_few_shot_block,
@@ -41,6 +46,8 @@ from src.prompts import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+RESPONSE_SCHEMA_BY_TASK = {"both": RESPONSE_SCHEMA, "vad": RESPONSE_SCHEMA_VAD, "cat": RESPONSE_SCHEMA_CAT}
 
 
 def load_config(path: str) -> dict:
@@ -70,12 +77,34 @@ def load_config(path: str) -> dict:
             raise ValueError('few_shot config must be a dict with an "n" field, e.g. {"n": 4}')
         if not isinstance(cfg["few_shot"]["n"], int) or cfg["few_shot"]["n"] < 1:
             raise ValueError("few_shot.n must be a positive integer")
+    cfg.setdefault("task", "both")  # "vad" | "cat" | "both"; existing configs lack this -> unchanged
+    if cfg["task"] not in ("vad", "cat", "both"):
+        raise ValueError('task must be one of "vad", "cat", "both"')
     return cfg
 
 
 def apply_smoke(cfg: dict) -> dict:
     cfg["max_eval"] = 20
     print("[smoke] max_eval=20")
+    return cfg
+
+
+def apply_task_override(cfg: dict, task: str | None) -> dict:
+    """--task CLI override: if given, replaces cfg["task"] for this invocation."""
+    if task is not None:
+        cfg["task"] = task
+    return cfg
+
+
+def apply_task_namespacing(cfg: dict) -> dict:
+    """Keep vad-only/cat-only runs from colliding with a "both" run of the
+    same config (or each other): suffix experiment_name and nest output_dir
+    under a task subdirectory, e.g. outputs/vad/c0_llama31_vad/. A no-op for
+    task == "both", so the default baseline path is unchanged.
+    """
+    if cfg["task"] != "both":
+        cfg["experiment_name"] = f"{cfg['experiment_name']}_{cfg['task']}"
+        cfg["output_dir"] = str(Path(cfg["output_dir"]) / cfg["task"])
     return cfg
 
 
@@ -112,13 +141,25 @@ def resolve_render_fn(cfg: dict) -> Callable[[dict, list[dict]], str]:
     raise ValueError(f"Unknown condition '{condition}'")
 
 
-def load_done_ids(preds_path: Path) -> set[str]:
+def _record_succeeded(rec: dict, task: str) -> bool:
+    """Whether rec's prediction(s) are non-null for the given task -- the
+    signal a "vad"/"cat"/"both" call is actually expected to produce.
+    "vad" only ever populates pred_vad (pred_label stays None by design),
+    so checking pred_label there would mark every record as failed.
+    """
+    if task == "vad":
+        vad = rec.get("pred_vad")
+        return bool(vad) and all(vad.get(dim) is not None for dim in ("v", "a", "d"))
+    return rec.get("pred_label") is not None
+
+
+def load_done_ids(preds_path: Path, task: str = "both") -> set[str]:
     """Read existing preds.jsonl, tolerating a corrupt/truncated trailing line.
 
-    Only rows with a successful (non-null) pred_label count as done -- rows
-    that failed even after retry (e.g. the Ollama server died mid-run) are
-    left out so they get retried on the next invocation, without needing to
-    wipe the whole file. src/score.py's load_preds() dedupes by
+    Only rows with a successful (task-appropriate, non-null) prediction count
+    as done -- rows that failed even after retry (e.g. the Ollama server died
+    mid-run) are left out so they get retried on the next invocation, without
+    needing to wipe the whole file. src/score.py's load_preds() dedupes by
     utterance_id (last write wins) to handle the resulting re-attempt rows.
     """
     done: set[str] = set()
@@ -134,7 +175,7 @@ def load_done_ids(preds_path: Path) -> set[str]:
             except json.JSONDecodeError:
                 continue
             uid = rec.get("utterance_id")
-            if uid is not None and rec.get("pred_label") is not None:
+            if uid is not None and _record_succeeded(rec, task):
                 done.add(uid)
     return done
 
@@ -210,6 +251,7 @@ def process_one(
     render_fn,
     options: dict,
     system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
 ) -> dict:
     """Run one utterance through Ollama and build its preds.jsonl record.
 
@@ -224,7 +266,7 @@ def process_one(
     }
 
     pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA
+        cfg["model"], system_prompt, user_prompt, options, response_schema
     )
 
     return {
@@ -264,6 +306,7 @@ def process_one_c2ab(
     kwargs: dict,
     options: dict,
     system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
 ) -> dict:
     """C2a ("random") / C2b ("sim") single-call path.
 
@@ -279,7 +322,7 @@ def process_one_c2ab(
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
     pred_label, pred_vad, latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA
+        cfg["model"], system_prompt, user_prompt, options, response_schema
     )
 
     return {
@@ -370,13 +413,14 @@ def process_one_c2c(
     kwargs: dict,
     options: dict,
     system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
 ) -> dict:
     """C2c ("llm_select") two-stage path: LLM-judged selection, then the
     existing dual-output prediction call with the selected turns as context.
 
-    system_prompt only affects the stage-2 prediction call -- stage 1
-    (select_stage1) always uses SELECTION_SYSTEM_PROMPT, since it doesn't
-    output VAD and few-shot VAD calibration is irrelevant to it.
+    system_prompt/response_schema only affect the stage-2 prediction call --
+    stage 1 (select_stage1) always uses SELECTION_SYSTEM_PROMPT, since it
+    doesn't output VAD/label and few-shot VAD calibration is irrelevant to it.
     """
     pool_size = len(history)
     stage1 = select_stage1(row, history, cfg, k, kwargs, options)
@@ -386,7 +430,7 @@ def process_one_c2c(
     user_prompt = build_user_prompt_c1(turns, row["speaker"], row["text"])
     gold_label, gold_vad = _extract_gold_fields(row)
     pred_label, pred_vad, stage2_latency_ms, raw = call_ollama_with_retry(
-        cfg["model"], system_prompt, user_prompt, options, RESPONSE_SCHEMA
+        cfg["model"], system_prompt, user_prompt, options, response_schema
     )
 
     return {
@@ -409,7 +453,12 @@ def process_one_c2c(
     }
 
 
-def resolve_c2_process_fn(cfg: dict, options: dict, system_prompt: str = SYSTEM_PROMPT):
+def resolve_c2_process_fn(
+    cfg: dict,
+    options: dict,
+    system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
+):
     """Build a (row, history) -> record closure for condition=="C2",
     dispatching on context.strategy."""
     strategy = cfg["context"]["strategy"]
@@ -419,14 +468,16 @@ def resolve_c2_process_fn(cfg: dict, options: dict, system_prompt: str = SYSTEM_
     if strategy == "random":
         kwargs.setdefault("seed", cfg["seed"])
         return lambda row, history: process_one_c2ab(
-            row, history, cfg, strategy, k, kwargs, options, system_prompt
+            row, history, cfg, strategy, k, kwargs, options, system_prompt, response_schema
         )
     if strategy == "sim":
         return lambda row, history: process_one_c2ab(
-            row, history, cfg, strategy, k, kwargs, options, system_prompt
+            row, history, cfg, strategy, k, kwargs, options, system_prompt, response_schema
         )
     if strategy == "llm_select":
-        return lambda row, history: process_one_c2c(row, history, cfg, k, kwargs, options, system_prompt)
+        return lambda row, history: process_one_c2c(
+            row, history, cfg, k, kwargs, options, system_prompt, response_schema
+        )
     raise ValueError(f"Unknown C2 context.strategy '{strategy}'")
 
 
@@ -495,14 +546,18 @@ def ensure_ollama_reachable(model: str) -> None:
 
 
 def dry_run_preview(
-    rows: list[tuple[dict, list[dict]]], render_fn, cfg: dict, system_prompt: str = SYSTEM_PROMPT
+    rows: list[tuple[dict, list[dict]]],
+    render_fn,
+    cfg: dict,
+    system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
 ) -> None:
     print("=" * 80)
     print("SYSTEM PROMPT:")
     print(system_prompt)
     print("=" * 80)
     print("RESPONSE SCHEMA:")
-    print(json.dumps(RESPONSE_SCHEMA, indent=2))
+    print(json.dumps(response_schema, indent=2))
     print("=" * 80)
 
     samples = []
@@ -542,7 +597,10 @@ def _pick_dry_run_samples_c2(rows: list[tuple[dict, list[dict]]], k: int):
 
 
 def dry_run_preview_c2(
-    rows: list[tuple[dict, list[dict]]], cfg: dict, system_prompt: str = SYSTEM_PROMPT
+    rows: list[tuple[dict, list[dict]]],
+    cfg: dict,
+    system_prompt: str = SYSTEM_PROMPT,
+    response_schema: dict = RESPONSE_SCHEMA,
 ) -> None:
     strategy = cfg["context"]["strategy"]
     k = cfg["context"].get("k", 4)
@@ -551,6 +609,9 @@ def dry_run_preview_c2(
     print("=" * 80)
     print("SYSTEM PROMPT (stage 2 / prediction):")
     print(system_prompt)
+    print("=" * 80)
+    print("RESPONSE SCHEMA (stage 2 / prediction):")
+    print(json.dumps(response_schema, indent=2))
     print("=" * 80)
     if strategy == "llm_select":
         print("SELECTION SYSTEM PROMPT (stage 1):")
@@ -597,9 +658,19 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--task",
+        choices=["vad", "cat", "both"],
+        default=None,
+        help="Override the config's task: \"vad\"/\"cat\" split the single dual-output call into "
+        "a VAD-only or categorical-only call with its own system prompt/schema; default is the "
+        "config's own task field, or \"both\" (today's behavior) if it has none.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cfg = apply_task_override(cfg, args.task)
+    cfg = apply_task_namespacing(cfg)
     if args.smoke:
         cfg = apply_smoke(cfg)
 
@@ -617,15 +688,16 @@ def main() -> None:
     few_shot_block = None
     if few_shot_cfg:
         examples = select_few_shot_examples(df, train_sessions, few_shot_cfg["n"], cfg["seed"])
-        few_shot_block = build_few_shot_block(examples)
-    system_prompt = build_system_prompt(few_shot_block)
+        few_shot_block = build_few_shot_block(examples, task=cfg["task"])
+    system_prompt = build_system_prompt(few_shot_block, cfg["task"])
+    response_schema = RESPONSE_SCHEMA_BY_TASK[cfg["task"]]
 
     if args.dry_run:
         if condition in ("C0", "C1"):
             render_fn = resolve_render_fn(cfg)
-            dry_run_preview(rows, render_fn, cfg, system_prompt)
+            dry_run_preview(rows, render_fn, cfg, system_prompt, response_schema)
         elif condition == "C2":
-            dry_run_preview_c2(rows, cfg, system_prompt)
+            dry_run_preview_c2(rows, cfg, system_prompt, response_schema)
         else:
             raise ValueError(f"Unknown condition '{condition}'")
         return
@@ -649,7 +721,7 @@ def main() -> None:
 
     write_run_meta(output_dir, cfg, system_prompt)
 
-    done_ids = load_done_ids(preds_path)
+    done_ids = load_done_ids(preds_path, cfg["task"])
     remaining = [(row, hist) for row, hist in rows if row["utterance_id"] not in done_ids]
 
     print(
@@ -658,14 +730,16 @@ def main() -> None:
     )
 
     options = {"temperature": cfg["temperature"], "seed": cfg["seed"]}
-    n_invalid_label = 0
+    n_invalid = 0
     concurrency = max(1, cfg["concurrency"])
 
     if condition in ("C0", "C1"):
         render_fn = resolve_render_fn(cfg)
-        submit_fn = lambda row, history: process_one(row, history, cfg, render_fn, options, system_prompt)
+        submit_fn = lambda row, history: process_one(
+            row, history, cfg, render_fn, options, system_prompt, response_schema
+        )
     elif condition == "C2":
-        submit_fn = resolve_c2_process_fn(cfg, options, system_prompt)
+        submit_fn = resolve_c2_process_fn(cfg, options, system_prompt, response_schema)
     else:
         raise ValueError(f"Unknown condition '{condition}'")
 
@@ -685,14 +759,14 @@ def main() -> None:
                 unit="utt",
             ):
                 record = future.result()
-                if record["pred_label"] is None:
-                    n_invalid_label += 1
+                if not _record_succeeded(record, cfg["task"]):
+                    n_invalid += 1
                 f.write(json.dumps(record) + "\n")
                 f.flush()
 
     print(
         f"[run] done. {len(remaining)} processed this run, "
-        f"{n_invalid_label} with invalid/missing label."
+        f"{n_invalid} with invalid/missing prediction."
     )
 
 

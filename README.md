@@ -129,6 +129,32 @@ python -m src.score --run outputs/c2_llm_fewshot_llama31_val_demo
 
 Each zero-shot/few-shot pair shares every config field except `few_shot`, so `--smoke`'s deterministic first-20-rows slice means both runs in a pair score the identical 20 utterances — a clean paired comparison. 20 samples is far too few for a reliable Pearson r; treat this as a "did anything move at all" smoke test, not a result.
 
+### Task split: VAD-only vs. categorical-only calls
+
+By default every run makes a single dual-output Ollama call, asking for a categorical emotion label *and* a Valence/Arousal/Dominance (VAD) triple together. A `--task {vad,cat,both}` flag (or an equivalent top-level `"task"` config field) narrows a run to one output only, with its own system prompt and JSON schema — useful for testing whether asking for both jointly changes what the model predicts, versus asking for each separately. `both` (the default) is byte-for-byte the original prompt/schema; no existing config or command needs to change.
+
+VAD/arousal/dominance definitions used in the VAD-only (and dual) prompt:
+- **Valence (v)**: how positive or negative the emotional tone is — the pleasantness or unpleasantness of the speaker's affective state. 1.0 = very negative, 5.0 = very positive.
+- **Arousal (a)**: the intensity of activation in the speaker's affective state — how calm/passive versus excited/energized they sound. 1.0 = very calm, 5.0 = very activated.
+- **Dominance (d)**: the degree of control or power conveyed by the speaker's affective state — how submissive/controlled versus in-control/dominant they sound. 1.0 = very submissive, 5.0 = very dominant.
+
+`--task` never requires a new config file: it overrides whatever the config says (or the `"both"` default) for that one invocation. Whenever the effective task isn't `"both"`, output is automatically namespaced under `outputs/{vad,cat}/<experiment_name>_{vad,cat}/` so it can't collide with a `"both"` run of the same config, or with the other task's run.
+
+```bash
+# Dry run: system prompt/schema shown match the requested task only.
+python -m src.run --config configs/c0_llama31_val_demo.json --task vad --dry-run
+python -m src.run --config configs/c0_llama31_val_demo.json --task cat --dry-run
+
+# Smoke (20 utterances).
+python -m src.run --config configs/c0_llama31_val_demo.json --task vad --smoke
+python -m src.run --config configs/c0_llama31_val_demo.json --task cat --smoke
+
+python -m src.score --run outputs/vad/c0_llama31_val_demo_vad
+python -m src.score --run outputs/cat/c0_llama31_val_demo_cat
+```
+
+A `vad`-task run's `metrics.json` will have a populated `dimensional` block and an empty/nan `categorical` block (no `label` was ever requested); a `cat`-task run is the mirror image.
+
 ## Output layout
 
 ```

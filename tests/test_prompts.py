@@ -1,7 +1,13 @@
+import pytest
+
 from src.data import LABELS, build_context
 from src.prompts import (
     RESPONSE_SCHEMA,
+    RESPONSE_SCHEMA_CAT,
+    RESPONSE_SCHEMA_VAD,
     SYSTEM_PROMPT,
+    SYSTEM_PROMPT_CAT,
+    SYSTEM_PROMPT_VAD,
     build_few_shot_block,
     build_selection_schema,
     build_system_prompt,
@@ -86,3 +92,53 @@ def test_build_system_prompt_with_block_contains_both():
     prompt = build_system_prompt(block)
     assert prompt.startswith(SYSTEM_PROMPT)
     assert block in prompt
+
+
+def test_response_schema_vad_requires_only_vad():
+    assert set(RESPONSE_SCHEMA_VAD["properties"]) == {"vad"}
+    assert set(RESPONSE_SCHEMA_VAD["properties"]["vad"]["properties"]) == {"v", "a", "d"}
+    assert RESPONSE_SCHEMA_VAD["required"] == ["vad"]
+
+
+def test_response_schema_cat_requires_only_label():
+    assert set(RESPONSE_SCHEMA_CAT["properties"]) == {"label"}
+    assert RESPONSE_SCHEMA_CAT["properties"]["label"]["enum"] == LABELS
+    assert RESPONSE_SCHEMA_CAT["required"] == ["label"]
+
+
+def test_system_prompt_vad_has_no_categorical_content():
+    assert "CATEGORICAL LABELS" not in SYSTEM_PROMPT_VAD
+    assert "ang: angry" not in SYSTEM_PROMPT_VAD
+    assert "VAD DIMENSIONS" in SYSTEM_PROMPT_VAD
+
+
+def test_system_prompt_vad_defines_each_dimension():
+    for term in ("pleasantness", "activation", "control"):
+        assert term in SYSTEM_PROMPT_VAD
+
+
+def test_system_prompt_cat_has_no_vad_content():
+    assert "VAD DIMENSIONS" not in SYSTEM_PROMPT_CAT
+    assert "valence" not in SYSTEM_PROMPT_CAT.lower()
+    assert "CATEGORICAL LABELS" in SYSTEM_PROMPT_CAT
+
+
+@pytest.mark.parametrize(
+    "task,expected",
+    [("both", SYSTEM_PROMPT), ("vad", SYSTEM_PROMPT_VAD), ("cat", SYSTEM_PROMPT_CAT)],
+)
+def test_build_system_prompt_identity_per_task(task, expected):
+    assert build_system_prompt(None, task) is expected
+    assert build_system_prompt("", task) is expected
+
+
+def test_build_few_shot_block_vad_task_omits_label():
+    block = build_few_shot_block(_few_shot_examples(), task="vad")
+    assert '"label"' not in block
+    assert '"v": 1.5' in block
+
+
+def test_build_few_shot_block_cat_task_omits_vad():
+    block = build_few_shot_block(_few_shot_examples(), task="cat")
+    assert '"vad"' not in block
+    assert '"label": "ang"' in block

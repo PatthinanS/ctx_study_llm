@@ -56,6 +56,16 @@ Don't collapse `condition` and `context.strategy` back into one field — that's
 
 `few_shot` is a third independent config axis: an optional top-level `{"n": <int>}` field, `cfg.setdefault("few_shot", None)`-gated in `load_config`, so any config without it is byte-for-byte unaffected. `src/prompts.py::build_system_prompt(few_shot_block)` returns the `SYSTEM_PROMPT` constant unchanged (same object, not just equal) when there's no block — that identity is what guarantees the zero-shot path stays untouched. The resolved `system_prompt` string is threaded as a new trailing default-valued parameter (`system_prompt: str = SYSTEM_PROMPT`) through `process_one`, `process_one_c2ab`, `process_one_c2c` (stage-2 only — stage-1 turn selection keeps `SELECTION_SYSTEM_PROMPT` unmodified, since it doesn't output VAD), `resolve_c2_process_fn`, `dry_run_preview(_c2)`, and `write_run_meta` — existing callers/tests that don't pass it keep working unchanged. `src/data.py::select_few_shot_examples` draws examples only from `splits.train_sessions` (read from config, never hardcoded), bucketed by dominance and picked deterministically via the existing `_stable_seed` helper (same seeding convention `_strategy_random` uses) — spread across the range rather than a plain random sample, since dominance is the dimension this demo is meant to test. `src/score.py` needed no changes: `few_shot` shows up in `run_meta.json` automatically via its verbatim `cfg` dump, and no new `preds.jsonl` field was introduced.
 
+## Task splitting: VAD-only vs. categorical-only calls (orthogonal to `condition`/`context.strategy`/`few_shot`)
+
+`task` is a fourth independent config axis: `cfg.setdefault("task", "both")`-gated in `load_config`, so any config without it keeps today's dual-output behavior byte-for-byte. `"both"` uses the original `SYSTEM_PROMPT`/`RESPONSE_SCHEMA` (categorical label + VAD in one call) untouched — it's the baseline every other value is compared against. `"vad"`/`"cat"` swap in `SYSTEM_PROMPT_VAD`/`SYSTEM_PROMPT_CAT` and `RESPONSE_SCHEMA_VAD`/`RESPONSE_SCHEMA_CAT` (`src/prompts.py`), each asking for only the one output, so the study can isolate whether requesting VAD and the categorical label jointly changes what the model predicts versus requesting each separately. `SYSTEM_PROMPT_VAD` also carries actual definitions of valence/arousal/dominance (pleasantness, activation intensity, perceived control) rather than just the 1.0-5.0 scale anchors `SYSTEM_PROMPT` has always had.
+
+Selection is **not** by filename — it's an explicit `task` field, overridable per-invocation via `python -m src.run --config <cfg> --task {vad,cat,both}` (`apply_task_override`, same shape as the existing `--smoke`/`apply_smoke` pattern). Whenever the effective task isn't `"both"`, `apply_task_namespacing` suffixes `experiment_name` and nests `output_dir` under a `vad/`/`cat/` subdirectory (e.g. `outputs/vad/c0_llama31_vad/`) so a vad-only run, a cat-only run, and a plain run of the same config never collide in the same `preds.jsonl`.
+
+`response_schema` threads through `process_one`, `process_one_c2ab`, `process_one_c2c` (stage-2 only — stage-1 turn selection keeps `SELECTION_SYSTEM_PROMPT`/its own schema unmodified, since it doesn't output VAD or a label), `resolve_c2_process_fn`, and `dry_run_preview(_c2)` as a new trailing default-valued parameter (`response_schema: dict = RESPONSE_SCHEMA`), the same pattern `system_prompt` already uses for `few_shot`. `build_few_shot_block`/`build_system_prompt` both take a `task` argument so few-shot examples and the system prompt stay in the same shape as whichever schema is active.
+
+Two places assumed `pred_label` was always the success signal, which only held because every call used to be dual-output — both needed a task-aware fix, not just new prompt/schema constants: `load_done_ids` (resume correctness — a `"vad"` run's `pred_label` is always `None` by design, so the old check would mark every utterance as never-done and re-run the whole file on every resume) and `main()`'s invalid-prediction counter. Both now go through a shared `_record_succeeded(rec, task)` helper. `validate_and_clamp` and `src/score.py`/`src/metrics.py` needed **no** changes — they already degrade gracefully on a missing `label`/`vad` key and an empty categorical/dimensional subset respectively.
+
 ## Invariants to preserve
 
 - `src/run.py`'s inference loop must never raise on a bad/missing/malformed Ollama response. One retry (`call_ollama_with_retry`), then record whatever's salvageable (nulls where invalid) and continue. A single bad utterance must never kill a multi-hour remote run.
@@ -104,6 +114,14 @@ python -m src.score --run outputs/c1_llama31_val_demo
 python -m src.score --run outputs/c1_fewshot_llama31_val_demo
 python -m src.score --run outputs/c2_llm_llama31_val_demo
 python -m src.score --run outputs/c2_llm_fewshot_llama31_val_demo
+
+# Task split (VAD-only / categorical-only calls), --task overrides any existing config, no new config files needed
+python -m src.run --config configs/c0_llama31_val_demo.json --task vad --dry-run
+python -m src.run --config configs/c0_llama31_val_demo.json --task cat --dry-run
+python -m src.run --config configs/c0_llama31_val_demo.json --task vad --smoke
+python -m src.run --config configs/c0_llama31_val_demo.json --task cat --smoke
+python -m src.score --run outputs/vad/c0_llama31_val_demo_vad
+python -m src.score --run outputs/cat/c0_llama31_val_demo_cat
 ```
 
 ## Testing

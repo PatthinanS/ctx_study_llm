@@ -5,6 +5,11 @@ run_meta.json for every run. condition ("C0"/"C1" -> which template) is
 decoupled from context.strategy ("none"/"window"/"retrieval" -> which turns
 get selected) so a future C2 (retrieval) condition can reuse the C1 template
 unchanged -- only src/data.py's STRATEGY_REGISTRY needs a new entry.
+
+task ("both"/"vad"/"cat", see cfg["task"] in src/run.py) picks between
+SYSTEM_PROMPT (unchanged -- kept as the dual-output baseline), SYSTEM_PROMPT_VAD,
+and SYSTEM_PROMPT_CAT via build_system_prompt/build_few_shot_block's task
+argument, each paired with its own RESPONSE_SCHEMA*.
 """
 from __future__ import annotations
 
@@ -32,6 +37,33 @@ VAD DIMENSIONS (each on a continuous 1.0-5.0 scale, one decimal place allowed):
 - d (dominance): 1.0 = very submissive, 5.0 = very dominant
 
 OUTPUT FORMAT: Respond with JSON only, matching the required schema exactly. No prose, no explanation, no markdown fences."""
+
+SYSTEM_PROMPT_VAD = """You are an expert annotator for emotion recognition in conversation (IEMOCAP).
+
+TASK: Given a single TARGET utterance from a dyadic conversation (optionally with preceding context), predict continuous Valence/Arousal/Dominance (VAD) ratings for the TARGET utterance only.
+
+VAD DIMENSIONS (each on a continuous 1.0-5.0 scale, one decimal place allowed):
+- v (valence): how positive or negative the emotional tone is -- the pleasantness or unpleasantness of the speaker's affective state. 1.0 = very negative, 5.0 = very positive.
+- a (arousal): the intensity of activation in the speaker's affective state -- how calm/passive versus excited/energized they sound. 1.0 = very calm, 5.0 = very activated.
+- d (dominance): the degree of control or power conveyed by the speaker's affective state -- how submissive/controlled versus in-control/dominant they sound. 1.0 = very submissive, 5.0 = very dominant.
+
+OUTPUT FORMAT: Respond with JSON only, matching the required schema exactly. No prose, no explanation, no markdown fences."""
+
+SYSTEM_PROMPT_CAT = """You are an expert annotator for emotion recognition in conversation (IEMOCAP).
+
+TASK: Given a single TARGET utterance from a dyadic conversation (optionally with preceding context), predict a categorical emotion label for the TARGET utterance only.
+
+CATEGORICAL LABELS (choose exactly one):
+- ang: angry
+- hap: happy
+- exc: excited
+- neu: neutral
+- sad: sad
+- fru: frustrated
+
+OUTPUT FORMAT: Respond with JSON only, matching the required schema exactly. No prose, no explanation, no markdown fences."""
+
+_SYSTEM_PROMPT_BY_TASK = {"both": SYSTEM_PROMPT, "vad": SYSTEM_PROMPT_VAD, "cat": SYSTEM_PROMPT_CAT}
 
 
 def build_user_prompt_c0(text: str) -> str:
@@ -71,17 +103,49 @@ RESPONSE_SCHEMA = {
     "required": ["label", "vad"],
 }
 
+RESPONSE_SCHEMA_VAD = {
+    "type": "object",
+    "properties": {
+        "vad": {
+            "type": "object",
+            "properties": {
+                "v": {"type": "number"},
+                "a": {"type": "number"},
+                "d": {"type": "number"},
+            },
+            "required": ["v", "a", "d"],
+        },
+    },
+    "required": ["vad"],
+}
 
-def build_few_shot_block(examples: list[dict]) -> str:
-    """Render fixed text -> {label, vad} demonstrations, matching
-    RESPONSE_SCHEMA's exact output shape, so the model sees the required
-    format and the 1.0-5.0 VAD scale together.
+RESPONSE_SCHEMA_CAT = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "enum": LABELS},
+    },
+    "required": ["label"],
+}
+
+
+def build_few_shot_block(examples: list[dict], task: str = "both") -> str:
+    """Render fixed text -> output demonstrations, matching the task's
+    response schema exactly, so the model sees the required format (and,
+    for "vad"/"both", the 1.0-5.0 VAD scale) alongside real examples.
 
     examples: list of {"text": str, "label": str, "vad": {"v","a","d": float}}.
+    task: "both" (default) includes label+vad, "vad" includes vad only,
+    "cat" includes label only -- matching RESPONSE_SCHEMA*'s required fields.
     """
     blocks = []
     for i, ex in enumerate(examples, 1):
-        output = json.dumps({"label": ex["label"], "vad": ex["vad"]})
+        if task == "vad":
+            output_obj = {"vad": ex["vad"]}
+        elif task == "cat":
+            output_obj = {"label": ex["label"]}
+        else:
+            output_obj = {"label": ex["label"], "vad": ex["vad"]}
+        output = json.dumps(output_obj)
         blocks.append(f'Example {i}:\nUtterance: "{ex["text"]}"\nOutput: {output}')
     return (
         "EXAMPLES (showing the required output format and the 1.0-5.0 VAD scale; "
@@ -89,15 +153,17 @@ def build_few_shot_block(examples: list[dict]) -> str:
     )
 
 
-def build_system_prompt(few_shot_block: str | None = None) -> str:
-    """SYSTEM_PROMPT, optionally with a few-shot examples block appended.
+def build_system_prompt(few_shot_block: str | None = None, task: str = "both") -> str:
+    """SYSTEM_PROMPT[_VAD|_CAT] for `task`, optionally with a few-shot
+    examples block appended.
 
-    Returns SYSTEM_PROMPT unchanged (same object) when few_shot_block is
+    Returns the base prompt unchanged (same object) when few_shot_block is
     falsy, so the zero-shot path stays byte-for-byte identical.
     """
+    base = _SYSTEM_PROMPT_BY_TASK[task]
     if not few_shot_block:
-        return SYSTEM_PROMPT
-    return f"{SYSTEM_PROMPT}\n\n{few_shot_block}"
+        return base
+    return f"{base}\n\n{few_shot_block}"
 
 
 SELECTION_SYSTEM_PROMPT = """You are selecting which prior conversation turns to give to a downstream emotion-recognition annotator as context for a single TARGET utterance.
